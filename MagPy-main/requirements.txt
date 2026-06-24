@@ -1,0 +1,9 @@
+pyqt6
+matplotlib
+numpy
+pandas
+openpyxl
+scipy
+harmonica
+xarray
+xlrd

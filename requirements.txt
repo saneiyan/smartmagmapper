@@ -1,0 +1,17 @@
+PyQt6
+PyQt6-WebEngine
+matplotlib
+numpy
+pandas
+openpyxl
+scipy
+scikit-learn
+pyproj
+vmdpy
+utm
+folium
+branca
+ppigrf
+harmonica
+xarray
+xlrd
