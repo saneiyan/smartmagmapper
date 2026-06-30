@@ -13,7 +13,7 @@ Important files:
 - `GeoXAIInterpreter.py` - explanation layer for candidate estimates.
 - `DialogWindow.py`, `ExcelReader.py`, `MapFilter.py`, `MapMaker.py`, `PlotData.py`, `TableModel.py`, `WebMap.py` - original MagPy support modules.
 - `requirements.txt` - Python packages needed to run the app.
-- `Start_Orphan_Well_App.bat` - optional Windows double-click launcher.
+
 
 Survey data files are not included in this repository. Each user should load survey files from their own computer using the app.
 
@@ -40,14 +40,6 @@ From PowerShell:
 ```powershell
 python GUI.py
 ```
-
-On Windows, you can also double-click:
-
-```text
-Start_Orphan_Well_App.bat
-```
-
-The `.bat` file only starts the app. It is not the app itself and it does not contain data.
 
 ## Load A Survey
 
