@@ -75,6 +75,15 @@ The app performs these main steps:
 - `Scores` - anomaly score, threshold, and hit windows.
 - `GeoXAI` - explanation of the candidate estimate and confidence factors.
 
+## Apply Filters Menu
+
+The top `Apply Filters` menu includes:
+
+- `Upward Continuation` - applies an upward-continuation transform to the current BT field using the entered continuation height.
+- `Downward Continuation` - applies a downward-continuation transform to the current BT field using the entered continuation height.
+- `Reduction to Pole` - interpolates BT to a grid, estimates field direction from the survey date and location, and plots the RTP-transformed field.
+- `Variational Mode Decomposition` - decomposes the current BT trace, automatically selects anomaly-bearing modes, and redraws the map using the VMD-reconstructed BT field.
+
 ## Parameters
 
 The left control panel lets users adjust:

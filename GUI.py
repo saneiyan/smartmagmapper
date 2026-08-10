@@ -517,6 +517,9 @@ class MainWindow(QMainWindow):
         rtp_action = QAction('Reduction to Pole', self)
         rtp_action.triggered.connect(self.reduction_to_pole)
 
+        vmd_action = QAction('Variational Mode Decomposition', self)
+        vmd_action.triggered.connect(self.variational_mode_decomposition)
+
         #reset_canvas_actions
         reset_canvas_action = QAction('Clear Figure', self)
         #filter_action.setStatusTip('Filter Applied to Data')
@@ -550,6 +553,7 @@ class MainWindow(QMainWindow):
         self.filters_menu.addAction(filter_action)
         self.filters_menu.addAction(filter2_action)
         self.filters_menu.addAction(rtp_action)
+        self.filters_menu.addAction(vmd_action)
         self.toolbar.addAction(self.filters_menu.menuAction())
 
         #export_actions
@@ -1184,6 +1188,21 @@ class MainWindow(QMainWindow):
 
         return valid
 
+    def assign_optional_v_values(self):
+        self.vmin = None
+        self.vmax = None
+        vmin_entry = self.set_vmin.text().strip()
+        vmax_entry = self.set_vmax.text().strip()
+        try:
+            if vmin_entry:
+                self.vmin = float(vmin_entry)
+            if vmax_entry:
+                self.vmax = float(vmax_entry)
+            return True
+        except ValueError:
+            self.statusBar().showMessage('Invalid field scale value entered. Try again.')
+            return False
+
     #def change continuation height
     def assign_continuation_height(self):
         H_entry = self.set_continuation_height.text()
@@ -1383,9 +1402,9 @@ class MainWindow(QMainWindow):
         self.plot_data(df=self.current_df, vmin=self.vmin, vmax=self.vmax, contour=contour)
         self.update_current_plot(ymin=self.vmin, ymax=self.vmax)
 
-    def filtered_scale_changed(self, df, contour=None):
+    def filtered_scale_changed(self, df, contour=None, status_message=None):
         #checks if v values were assigned
-        if not self.assign_v_values():
+        if not self.assign_optional_v_values():
             return
         if self.toggle_map_type.isChecked():
             contour=True
@@ -1394,10 +1413,12 @@ class MainWindow(QMainWindow):
         #replot the figure widget
         self.axes = self.figure.add_subplot()
         mapper = mm.MapMaker(df)
-        self.assign_v_values()
+        self.assign_optional_v_values()
        # if (vmin, vmax) is None:
         mapper.showMap(df, ax=self.axes, vmin=self.vmin, vmax=self.vmax, contour=contour)
-        self.statusBar().showMessage(f'Continuation Height={self.H}m')
+        if status_message is None:
+            status_message = f'Continuation Height={self.H}m' if hasattr(self, 'H') else 'Filter applied'
+        self.statusBar().showMessage(status_message)
        # else:
        #     mapper.showMap(df, ax=self.axes, vmin=vmin, vmax=vmax)
         self.canvas.draw()
@@ -1453,6 +1474,28 @@ class MainWindow(QMainWindow):
         #runs data through reduction to pole filter
         rtp, easting_mesh, northing_mesh = filters.reduction_to_pole(year=self.date_year, month=self.date_month, day=self.date_day)
         self.plot_mesh(rtp=rtp, xmesh=easting_mesh, ymesh=northing_mesh)
+
+    def variational_mode_decomposition(self, df=None):
+        source_df = getattr(self, 'current_df', None)
+        if source_df is None or getattr(source_df, 'empty', True):
+            source_df = getattr(self, 'df', None)
+        if source_df is None or getattr(source_df, 'empty', True):
+            self.statusBar().showMessage('No data loaded for VMD filtering.')
+            return
+
+        try:
+            filters = mf.MapFilter(source_df)
+            filtered_df, selected_modes, _metrics = filters.variational_mode_decomposition()
+        except Exception as exc:
+            QMessageBox.warning(self, 'VMD Filter', f'VMD filter could not be applied:\n{exc}')
+            self.statusBar().showMessage('VMD filter failed.')
+            return
+
+        modes_text = ';'.join(str(mode) for mode in selected_modes)
+        self.filtered_scale_changed(
+            filtered_df,
+            status_message=f'VMD filter applied using selected modes {modes_text}'
+        )
 
     def reset_map(self):
         self.figure.clear()
