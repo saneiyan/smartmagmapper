@@ -18,17 +18,11 @@ class ExcelReader:
 
     def input_sheets(self):
         '''Merges separate Excel Sheets and cleans dataset'''
-#        magdf = pd.read_excel(self.file_path, sheet_name = 'Magnetometer')
-        #renaming columns from dataset to be uniform
-#        rename_columns = {'Time (s)': 'Mag_Time (s)', 'Magnetic field x (µT)': 'X (µT)',
-#                          'Magnetic field y (µT)': 'Y (µT)', 'Magnetic field z (µT)': 'Z (µT)'}
-#        self.magdf = magdf.rename(columns=rename_columns)
-#        if 'Time (s)' in self.magdf.columns:
-#            self.magdf = self.magdf.rename(columns={'Time (s)': 'Mag_Time (s)'})
-#        columns_to_keep = ['Mag_Time (s)', 'X (µT)', 'Y (µT)', 'Z (µT)']
-#        self.magdf = self.magdf[columns_to_keep]
+
+        self.magdf = self.magdf.loc[:, ~self.magdf.columns.duplicated()]
+
         #calculating total magnetic field vector from individual directions
-        self.magdf['BT'] = np.sqrt(self.magdf['X (µT)']**2 + self.magdf['Y (µT)']**2 + self.magdf['Z (µT)']**2)
+        #self.magdf['BT'] = np.sqrt(self.magdf['X (µT)']**2 + self.magdf['Y (µT)']**2 + self.magdf['Z (µT)']**2)
         #calculating the time difference of adjacent points throughout the dataset
         self.magdf['Diff'] = self.magdf['Mag_Time (s)'].diff()
         #calculating the mean difference between all datapoints, the sampling frequency
@@ -42,26 +36,32 @@ class ExcelReader:
         self.magdf = self.magdf.drop(self.magdf[self.magdf.Diff < magnetic_min_value].index)
         self.magdf = self.magdf.dropna().reset_index()
 
+        self.gpsdf = self.gpsdf.loc[:, ~self.gpsdf.columns.duplicated()]
+        if 'Loc_Time (s)' in self.gpsdf.columns:
+            #calculating the time difference of adjacent points throughout the dataset
+            self.gpsdf['Diff'] = self.gpsdf['Loc_Time (s)'].diff()
+            #calculating the mean difference between all datapoints, the sampling frequency
+            self.average_time_frequency = self.gpsdf['Diff'].mean()
+            #maximum trustworthy difference in time between two adjacent data points
+            time_max_value = self.average_time_frequency * 1.2
+            #minimum trustworthy difference in time between two adjacent data points
+            time_min_value = self.average_time_frequency * 0.8
+            #removing datapoints that are outside of the maximum and minimum variables
+            self.gpsdf = self.gpsdf.drop(self.gpsdf[self.gpsdf.Diff > time_max_value].index)
+            self.gpsdf = self.gpsdf.drop(self.gpsdf[self.gpsdf.Diff < time_min_value].index)
+            self.gpsdf = self.gpsdf.dropna().reset_index()
+            self.gpsdf = self.gpsdf.drop('Diff', axis=1)
+        else:
+            self.gpsdf['Loc_Time (s)'] = self.magdf['Mag_Time (s)']
 
-        #cleaning datapoints from Location sheet
-#        gpsdf = pd.read_excel(self.file_path, sheet_name = 'Location')
-#        if 'Time (s)' in gpsdf.columns:
-#            self.gpsdf = gpsdf.rename(columns={'Time (s)': 'Loc_Time (s)'})
-#        columns_to_keep = ['Loc_Time (s)', 'Latitude (°)', 'Longitude (°)','Height (m)']
-#        self.gpsdf = self.gpsdf[columns_to_keep]
-        #calculating the time difference of adjacent points throughout the dataset
-        self.gpsdf['Diff'] = self.gpsdf['Loc_Time (s)'].diff()
-        #calculating the mean difference between all datapoints, the sampling frequency
-        self.average_time_frequency = self.gpsdf['Diff'].mean()
-        #maximum trustworthy difference in time between two adjacent data points
-        time_max_value = self.average_time_frequency * 1.2
-        #minimum trustworthy difference in time between two adjacent data points
-        time_min_value = self.average_time_frequency * 0.8
-        #removing datapoints that are outside of the maximum and minimum variables
-        self.gpsdf = self.gpsdf.drop(self.gpsdf[self.gpsdf.Diff > time_max_value].index)
-        self.gpsdf = self.gpsdf.drop(self.gpsdf[self.gpsdf.Diff < time_min_value].index)
-        self.gpsdf = self.gpsdf.dropna().reset_index()
-        self.gpsdf = self.gpsdf.drop('Diff', axis=1)
+    def read_mag_field(self):
+        '''Reads the type of magnetic field data imported from the user'''
+        if 'BT' in self.magdf.columns:
+            self.input_sheets()
+        if 'BT' not in self.magdf.columns:
+            #calculating total magnetic field vector from individual directions
+            self.magdf['BT'] = np.sqrt(self.magdf['X (µT)']**2 + self.magdf['Y (µT)']**2 + self.magdf['Z (µT)']**2)
+            self.input_sheets()
 
 
     @staticmethod
@@ -139,8 +139,10 @@ class ExcelReader:
         n_interp = int(np.sum(~np.isnan(lat_i)))
         n_out = n_total - n_interp
         print(f"Total MAG rows: {n_total}  interpolated: {n_interp}  out-of-range (no bracket): {n_out}")
-        #mag[["Time (s)","Latitude_interp","Longitude_interp","frac_in_interval"]].head(12)
-        columns_to_keep = ['Mag_Time (s)', 'X (µT)', 'Y (µT)', 'Z (µT)', 'BT', 'Latitude (°)', 'Longitude (°)']
+        if all(col in self.magdf.columns for col in ['X (µT)', 'Y (µT)', 'Z (µT)']):
+            columns_to_keep = ['Mag_Time (s)', 'X (µT)', 'Y (µT)', 'Z (µT)', 'BT', 'Latitude (°)', 'Longitude (°)']
+        else:
+            columns_to_keep = ['Mag_Time (s)', 'BT', 'Latitude (°)', 'Longitude (°)']
         self.df = pd.DataFrame(self.magdf[columns_to_keep]).dropna()
         return self.df
 

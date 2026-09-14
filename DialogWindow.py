@@ -3,7 +3,8 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QPushButton, QDialog,QDialogButtonBox,
                              QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                              QFileDialog, QCheckBox, QRadioButton, QComboBox,
-                             QButtonGroup, QGroupBox, QTableView, QHeaderView)
+                             QButtonGroup, QGroupBox, QTableView, QHeaderView,
+                             QMessageBox)
 from PyQt6.QtGui import QFont
 import TableModel
 import pandas as pd
@@ -23,6 +24,7 @@ class CustomDialog(QDialog):
         self.mag_layout = QHBoxLayout()
         self.coordinates_layout = QHBoxLayout()
         self.time_layout = QHBoxLayout()
+        self.single_time_layout = QHBoxLayout()
 
         bold = QFont()
         bold.setBold(True)
@@ -114,12 +116,24 @@ class CustomDialog(QDialog):
         self.TimeHeader = QLabel('Time')
         #making header bold
         self.TimeHeader.setFont(bold)
-        #User selects the time of data (optional)
+        self.TimeButtonGroup = QButtonGroup()
+        #User checks if the mag data is vector or scalar
+        self.ComboTime = QRadioButton('Independent sensor timestamps')
+        self.ComboTime.toggled.connect(self.toggle_combo_time)
+        self.SingleTime = QRadioButton('Shared sensor timestamps')
+        self.SingleTime.toggled.connect(self.toggle_single_time)
+        #adding the two buttons to the magnetic field data type button group
+        self.TimeButtonGroup.addButton(self.ComboTime)
+        self.TimeButtonGroup.addButton(self.SingleTime)
+
+        #User selects the time of data
+        self.TotalTime = QComboBox()
+        self.TotalTime.setPlaceholderText('Select Time (sec)')
         self.MagTime = QComboBox()
         self.LocTime = QComboBox()
-        self.MagTime.setPlaceholderText('Select Magnetic Time')
+        self.MagTime.setPlaceholderText('Select Magnetic Time (sec)')
         self.LocTime = QComboBox()
-        self.LocTime.setPlaceholderText('Select GPS Time')
+        self.LocTime.setPlaceholderText('Select GPS Time (sec)')
 
         #adding widgets to the first section of the dialog box
         self.sub_layout.addWidget(self.FileNameLabel)
@@ -127,25 +141,12 @@ class CustomDialog(QDialog):
         self.sub_layout.addWidget(self.FileDialog)
         self.layout.addLayout(self.sub_layout)
 
-        #adding widgets to the second second of the dialog box
-        #self.layer_layout.addWidget(self.FileHeadersLabel)
-        #self.layer_layout.addWidget(self.FileHasHeaders)
-        #self.layer_layout.addWidget(self.LayerNameLabel)
-        #self.layer_layout.addWidget(self.LayerName)
-        #self.layout.addLayout(self.layer_layout)
-
-        #adding widgets to the third section of the dialog box
-        #self.layout.addWidget(self.FileTypeLabel)
-        #self.layout.addWidget(self.FileType_Excel)
-        #self.layout.addWidget(self.FileType_CSV)
-        self.FileType_Excel.setChecked(True)
-
         #adding widgets to the fourth section of the dialog box
-        #self.layout.addWidget(self.MagDataTypeLabel)
-        #self.mag_layout.addWidget(self.VectorMag)
-        #self.mag_layout.addWidget(self.ScalarMag)
+        self.layout.addWidget(self.MagDataTypeLabel)
+        self.mag_layout.addWidget(self.VectorMag)
+        self.mag_layout.addWidget(self.ScalarMag)
         self.VectorMag.setChecked(True)
-        #self.layout.addLayout(self.mag_layout)
+        self.layout.addLayout(self.mag_layout)
 
         #adding widgets to the fifth section of the dialog box
         self.button_layout.addWidget(self.XMagField)
@@ -156,13 +157,18 @@ class CustomDialog(QDialog):
 
         #sets the layout for the widgets in the dialog box
         self.layout.addLayout(self.button_layout)
-        #self.layout.addWidget(self.TotalMagField)
+        self.layout.addWidget(self.TotalMagField)
         self.layout.addWidget(self.CoordinatesHeader)
         self.coordinates_layout.addWidget(self.XLatitude)
         self.coordinates_layout.addWidget(self.YLongitude)
         self.layout.addLayout(self.coordinates_layout)
         self.layout.addWidget(self.TimeHeader)
+        self.single_time_layout.addWidget(self.SingleTime)
+        self.single_time_layout.addWidget(self.ComboTime)
+        self.ComboTime.setChecked(True)
+        self.layout.addLayout(self.single_time_layout)
         self.layout.addLayout(self.time_layout)
+        self.layout.addWidget(self.TotalTime)
 
         #sets the sample data table widget in the dialog box
         self.layout.addWidget(self.SampleLabel)
@@ -173,53 +179,75 @@ class CustomDialog(QDialog):
         #setting the main layout to the dialog box
         self.setLayout(self.layout)
 
-#   def select_file_typed(self):
-#        try:
-#            self.file_paths = self.FileName.text()
-#            self.file_paths = f'[{self.file_paths}]'
-#        except AttributeError:
-#            print(':(')
-
-
-#   def file_type(self):
-       #send to different file readers depending on excel vs csv
-
    def select_file_button_clicked(self):
        #calls the select file function
        self.select_file()
 
    def select_file(self):
        #assigns the file path selected by the user to a stored variable
-       self.file_paths, _ = QFileDialog.getOpenFileNames(parent=self, caption='Select Directory')
+       #filter to show CSV and Excel files by default
+       self.file_paths, _ = QFileDialog.getOpenFileNames(parent=self,
+                                                         caption='Select File(s)',
+                                                         filter='Dataset Files (*.csv *.xls *.xlsx *.txt)')
        #only occurs if a file is selected by the user
        if self.file_paths:
            #removes the [brackets] placed on filepath for the users
            self.file_path_shown = str(self.file_paths).strip('[]')
            self.FileName.setText(f'{self.file_path_shown}')
 
-#           self.read_csv()
            self.read_file()
 
    def read_file(self):
-        #read raw file and import the column headers in the drop down menus
-        if self.FileType_CSV.isChecked():
-            self.raw_file = pd.read_csv(self.file_paths[0])
-            columns = self.raw_file.columns
-        elif self.FileType_Excel.isChecked():
-            self.raw_file = pd.concat(pd.read_excel(self.file_paths[0], sheet_name=None), axis=1)
-            columns = self.raw_file.columns
-            columns = ['_'.join(col).strip() for col in self.raw_file.columns.values]
-            self.raw_file.columns = columns
+        # read raw file and import the column headers into the drop-down menus
+        import os
+        if not getattr(self, 'file_paths', None):
+            return
 
-        for column in self.raw_file.columns:
-            self.XMagField.addItem(f"{column}", columns)
-            self.YMagField.addItem(f"{column}", columns)
-            self.ZMagField.addItem(f"{column}", columns)
-            self.XLatitude.addItem(f"{column}", columns)
-            self.YLongitude.addItem(f"{column}", columns)
-            self.TotalMagField.addItem(f"{column}", columns)
-            self.MagTime.addItem(f"{column}", columns)
-            self.LocTime.addItem(f"{column}", columns)
+        path = self.file_paths[0]
+        ext = os.path.splitext(path)[1].lower()
+
+        # read CSV-like files (try to infer separator, fallback to default)
+        if ext in ('.csv', '.txt'):
+            try:
+                df = pd.read_csv(path, sep=None, engine='python', encoding='utf-8')
+            except Exception:
+                df = pd.read_csv(path)
+            self.FileType_CSV.setChecked(True)
+
+        # read Excel files (concatenate all sheets)
+        elif ext in ('.xls', '.xlsx'):
+            df = pd.concat(pd.read_excel(path, sheet_name=None), axis=1)
+            # flatten MultiIndex columns if present
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]
+            self.FileType_Excel.setChecked(True)
+
+        # fallback: try CSV then Excel
+        else:
+            try:
+                df = pd.read_csv(path)
+                self.FileType_CSV.setChecked(True)
+            except Exception:
+                df = pd.concat(pd.read_excel(path, sheet_name=None), axis=1)
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]
+                self.FileType_Excel.setChecked(True)
+
+        self.raw_file = df
+        columns = list(self.raw_file.columns)
+
+        # clear combo boxes before populating to avoid duplicates
+        for combo in (self.XMagField, self.YMagField, self.ZMagField,
+                      self.XLatitude, self.YLongitude, self.TotalMagField,
+                      self.MagTime, self.LocTime, self.TotalTime):
+            combo.clear()
+
+        for column in columns:
+            for combo in (self.XMagField, self.YMagField, self.ZMagField,
+                          self.XLatitude, self.YLongitude, self.TotalMagField,
+                          self.MagTime, self.LocTime, self.TotalTime):
+                combo.addItem(str(column), columns)
+
         self.sample_data()
 
 
@@ -229,14 +257,23 @@ class CustomDialog(QDialog):
         self.BZ = self.ZMagField.currentText()
         self.Lat = self.XLatitude.currentText()
         self.Lon = self.YLongitude.currentText()
+        self.BT = self.TotalMagField.currentText()
+        self.TotalTime = self.TotalTime.currentText()
         self.MagTime = self.MagTime.currentText()
         self.LocTime = self.LocTime.currentText()
-        self.BT = self.TotalMagField.currentText()
 
         if self.VectorMag.isChecked():
-            data = [self.BX, self.BY, self.BZ, self.Lat, self.Lon, self.MagTime, self.LocTime]
+            mag_data = [self.BX, self.BY, self.BZ]
         elif self.ScalarMag.isChecked():
-            data = [self.BT, self.Lat, self.Lon, self.MagTime, self.LocTime]
+            mag_data = [self.BT]
+
+        if self.SingleTime.isChecked():
+            time_data = [self.TotalTime]
+        elif self.ComboTime.isChecked():
+            time_data = [self.MagTime, self.LocTime]
+
+        coord_data = [self.Lat, self.Lon]
+        data = mag_data + time_data + coord_data
 
         self.raw_file = self.raw_file[data]
 
@@ -260,6 +297,19 @@ class CustomDialog(QDialog):
        self.XMagField.setEnabled(False)
        self.YMagField.setEnabled(False)
        self.ZMagField.setEnabled(False)
+
+   def toggle_combo_time(self):
+       self.TotalTime.setEnabled(False)
+       self.MagTime.setEnabled(True)
+       self.LocTime.setEnabled(True)
+
+   def toggle_single_time(self):
+       self.TotalTime.setEnabled(True)
+       self.MagTime.setEnabled(False)
+       self.LocTime.setEnabled(False)
+
+   def missing_variable_warning(self):
+       self.variablemissing = QMessageBox.warning(self, 'Missing Variable', 'Some variables have not been assigned. Please assign values to the missing variables before proceeding.')
 
 class ExportDialog(QDialog):
     def __init__(self, parent=None):
