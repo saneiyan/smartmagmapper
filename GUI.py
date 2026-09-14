@@ -61,10 +61,13 @@ class MainWindow(QMainWindow):
         super(MainWindow, self).__init__(parent)
         self.initUI()
         self.df_list = list()
+        self.processed_dfs = {}  # Cache for processed dataframes
+        self.dialog_configs = {}  # Cache for dialog config per file index
+        self.mag_gps_dfs = {}  # Cache for magdf/gpsdf per file index
 
     def initUI(self):
         #sets the window title
-        self.setWindowTitle('OrphaMag Studio')
+        self.setWindowTitle('SmartMagMapper')
         #set function to 'bold' labels
         bold = QFont()
         bold.setBold(True)
@@ -226,6 +229,9 @@ class MainWindow(QMainWindow):
     def update_global_controls_visibility(self, index):
         if hasattr(self, 'global_controls_widget'):
             self.global_controls_widget.setVisible(self.tabs.tabText(index) != 'OrphaMag')
+        # Update orphan well dataset selector when switching to OrphaMag tab
+        if index == 1 and self.tabs.tabText(index) == 'OrphaMag':
+            self._populate_ow_dataset_selector()
 
 
     def create_orphan_well_tab(self):
@@ -262,6 +268,22 @@ class MainWindow(QMainWindow):
                 background: #263244;
                 border-color: #64748B;
             }
+            QWidget#orphanWellPage QComboBox {
+                background: #1F2937;
+                color: #F9FAFB;
+                border: 1px solid #4B5563;
+                border-radius: 5px;
+                min-height: 28px;
+                padding: 4px;
+            }
+            QWidget#orphanWellPage QComboBox::drop-down {
+                border: none;
+            }
+            QWidget#orphanWellPage QComboBox QAbstractItemView {
+                background: #1F2937;
+                color: #F9FAFB;
+                selection-background-color: #4B5563;
+            }
             QWidget#orphanWellPage QDoubleSpinBox,
             QWidget#orphanWellPage QSpinBox,
             QWidget#orphanWellPage QTextEdit {
@@ -296,6 +318,18 @@ class MainWindow(QMainWindow):
 
         controls = QGroupBox('Workflow and parameters')
         controls_layout = QVBoxLayout()
+
+        # Dataset selection dropdown
+        dataset_layout = QHBoxLayout()
+        dataset_label = QLabel('Select Dataset:')
+        self.ow_dataset_selector = QComboBox()
+        self.ow_dataset_selector.setPlaceholderText('Choose imported dataset...')
+        self.ow_dataset_selector.currentIndexChanged.connect(self._update_ow_dataset)
+        dataset_layout.addWidget(dataset_label)
+        dataset_layout.addWidget(self.ow_dataset_selector)
+        dataset_layout.addStretch()
+        controls_layout.addLayout(dataset_layout)
+
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
@@ -485,6 +519,11 @@ class MainWindow(QMainWindow):
         for spinbox in analysis_widgets:
             spinbox.valueChanged.connect(self.schedule_orphan_analysis)
         self.ow_reference_known.stateChanged.connect(self.schedule_orphan_analysis)
+
+        # Initialize the dataset selector with any existing datasets
+        if hasattr(self, 'df_list') and self.df_list:
+            self._populate_ow_dataset_selector()
+
         return widget
 
 
@@ -573,8 +612,13 @@ class MainWindow(QMainWindow):
         #main window
         self.dlg = dw.CustomDialog(self)
         self.dlg.FileDialog.clicked.connect(self.dlg.select_file_button_clicked)
-        self.dlg.accepted.connect(self.dlg.assign_variables)
-        self.dlg.accepted.connect(self.read_from_dialog)
+        # Remove the default accepted handlers so validation can run first
+        try:
+            self.dlg.FinishBtn.accepted.disconnect(self.dlg.accept)
+        except Exception:
+            pass
+        # connect FinishBtn to custom validator that shows a message box if variables missing
+        self.dlg.FinishBtn.accepted.connect(self._dialog_finish_handler)
         self.dlg.exec()
 
 #    def dialog_accepted(self):
@@ -585,29 +629,111 @@ class MainWindow(QMainWindow):
         try:
             self.file_paths = self.dlg.file_paths
             raw_file = self.dlg.raw_file
-#            if self.file_paths:
-#                self.read_file()
-#                print('Yay!')
             if raw_file is not None:
                 self.df_list.append(raw_file)
                 for index, value in enumerate(self.df_list):
                     print(f"Index: {index}, Value: {value}")
                 self.read_file(raw_file)
+                # Update orphan well dataset selector
+                self._populate_ow_dataset_selector()
                 print('Yeahh!')
         except Exception as e:
             print(f':( {e}')
             import traceback
             traceback.print_exc()
 
+    def _populate_ow_dataset_selector(self):
+        """Update the orphan well dataset dropdown with current imported datasets."""
+        self.ow_dataset_selector.blockSignals(True)
+        self.ow_dataset_selector.clear()
+
+        for index, df in enumerate(self.df_list):
+            # Use file name from select_file combobox if available, else use index
+            if index < self.select_file.count():
+                label = self.select_file.itemText(index)
+            else:
+                label = f'Dataset {index}'
+            self.ow_dataset_selector.addItem(label, index)
+
+        self.ow_dataset_selector.blockSignals(False)
+        if self.ow_dataset_selector.count() > 0:
+            self.ow_dataset_selector.setCurrentIndex(self.ow_dataset_selector.count() - 1)
+
+    def _update_ow_dataset(self, index):
+        """Handle orphan well dataset selection change and automatically process."""
+        if index < 0 or index >= len(self.df_list):
+            return
+        # Store the selected dataset for use in the pipeline
+        self.ow_selected_dataset = self.df_list[index]
+        self.ow_selected_dataset_index = index
+        self.statusBar().showMessage(f'Selected dataset: {self.ow_dataset_selector.itemText(index)}')
+
+        # Automatically trigger the orphan well pipeline
+        self.process_orphan_well_dataset()
+
+    def _dialog_finish_handler(self):
+        """Validate dialog dropdowns before finishing. If any required field is empty,
+        show the dialog's missing_variable_warning. Otherwise assign variables,
+        read from dialog and accept the dialog."""
+        dlg = self.dlg
+        # Determine required fields based on mag type
+        if dlg.VectorMag.isChecked():
+            mag_widgets = [dlg.XMagField, dlg.YMagField, dlg.ZMagField]
+        else:
+            mag_widgets = [dlg.TotalMagField]
+
+        # Determine required fields based on time type
+        if dlg.SingleTime.isChecked():
+            time_widgets = [dlg.TotalTime]
+        else:
+            time_widgets = [dlg.MagTime, dlg.LocTime]
+
+        coord_widgets = [dlg.XLatitude, dlg.YLongitude]
+        required_widgets = mag_widgets + time_widgets + coord_widgets
+
+        self.missing = []
+        for w in required_widgets:
+            try:
+                text = w.currentText()
+            except Exception:
+                try:
+                    text = w.text()
+                except Exception:
+                    text = ''
+            if not text:
+                self.missing.append(w)
+
+        if self.missing:
+            try:
+                self.dlg.missing_variable_warning()
+            except Exception:
+                self.statusBar().showMessage('Missing variables in dialog. Please fill all required fields.')
+            return
+
+        # all good: assign variables, process and close dialog
+        try:
+            dlg.assign_variables()
+        except Exception:
+            pass
+        try:
+            self.read_from_dialog()
+        except Exception:
+            pass
+        try:
+            dlg.accept()
+        except Exception:
+            pass
 
     def read_file(self, raw_file):
         if self.file_paths:
-            for file in self.file_paths:
+            for index, file in enumerate(self.file_paths):
                 self.short_name = os.path.basename(file)
                 if self.select_file.findText(self.short_name) == -1:
                     self.select_file.addItem(self.short_name, userData=file)
                 self.select_file.setPlaceholderText(self.short_name)
-                self.excel_reader(df=self.df_list[-1])
+                # Find the index in df_list for this file
+                file_index = len(self.df_list) - 1
+                self.excel_reader(df=self.df_list[-1], cache_index=file_index)
     #make excel reader optional? for people who don't want their data cleaned or already did it
 
     def orphan_params(self):
@@ -667,6 +793,42 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage('No orphan-well survey loaded.')
             return
         self.load_orphan_well_file(self.ow_file_path)
+
+    def process_orphan_well_dataset(self):
+        """Process the selected dataset from the dropdown through the orphan well pipeline."""
+        if not hasattr(self, 'ow_selected_dataset') or self.ow_selected_dataset is None:
+            self.statusBar().showMessage('Please select a dataset from the dropdown first.')
+            return
+
+        dataset_index = self.ow_selected_dataset_index
+        if dataset_index not in self.mag_gps_dfs:
+            self.statusBar().showMessage('Dataset not yet processed. Please re-import the dataset.')
+            return
+
+        params = self.orphan_params()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self.statusBar().showMessage('Processing selected dataset through orphan well pipeline...')
+
+            # Use cached magdf and gpsdf from excel_reader for this dataset
+            magdf, gpsdf = self.mag_gps_dfs[dataset_index]
+
+            # Process through pipeline
+            clean_df, audit = ow.clean_survey(magdf, gpsdf, params)
+            modes, mode_metrics, selected_modes = ow.run_vmd_modes(clean_df, params)
+            self.ow_clean_df = clean_df
+            self.ow_audit = audit
+            self.ow_modes = modes
+            self.ow_mode_metrics = mode_metrics
+            self.ow_selected_modes = selected_modes
+            self.run_orphan_analysis()
+            dataset_name = self.ow_dataset_selector.currentText()
+            self.statusBar().showMessage(f'Orphan-well processing complete: {dataset_name}')
+        except Exception as exc:
+            QMessageBox.critical(self, 'Orphan-well processing failed', str(exc))
+            self.statusBar().showMessage('Orphan-well processing failed.')
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def load_orphan_well_file(self, file_path):
         self.ow_file_path = str(file_path)
@@ -1014,8 +1176,8 @@ class MainWindow(QMainWindow):
                 center_lat = float(score_points['latitude'].mean())
                 center_lon = float(score_points['longitude'].mean())
             else:
-                center_lat = float(clean_df['Latitude (deg)'].mean())
-                center_lon = float(clean_df['Longitude (deg)'].mean())
+                center_lat = float(clean_df['Latitude (°)'].mean())
+                center_lon = float(clean_df['Longitude (°)'].mean())
 
             m = folium.Map(
                 location=[center_lat, center_lon],
@@ -1033,7 +1195,7 @@ class MainWindow(QMainWindow):
                 show=True,
             ).add_to(m)
 
-            route = clean_df[['Latitude (deg)', 'Longitude (deg)']].dropna()
+            route = clean_df[['Latitude (°)', 'Longitude (°)']].dropna()
             if len(route) > 900:
                 route = route.iloc[::max(1, int(np.ceil(len(route) / 900)))]
             route_points = route.values.tolist()
@@ -1239,44 +1401,86 @@ class MainWindow(QMainWindow):
         current_index = self.select_file.currentIndex()
         print(f'current index: {current_index}')
         try:
-            self.excel_reader(df=self.df_list[current_index])
+            if current_index in self.processed_dfs:
+                # Already processed, just display
+                self.display_processed_df(self.processed_dfs[current_index])
+            else:
+                # First time, process and cache
+                self.excel_reader(df=self.df_list[current_index], cache_index=current_index)
 
         except ValueError:
             self.statusBar().showMessage('File not selected. Try again.')
             return False
 
-    def excel_reader(self, df):#, file_path):
+    def excel_reader(self, df, cache_index=None):#, file_path):
         self.plot_tabs.clear()
-        bx = self.dlg.BX
-        by = self.dlg.BY
-        bz = self.dlg.BZ
-        Lat = self.dlg.Lat
-        Lon = self.dlg.Lon
-        LocTime = self.dlg.LocTime
-        MagTime = self.dlg.MagTime
-        mag_columns = [f'{bx}', f'{by}', f'{bz}', f'{MagTime}']
-        rename_mag_columns = {f'{bx}': 'X (µT)', f'{by}': 'Y (µT)', f'{bz}': 'Z (µT)', f'{MagTime}': 'Mag_Time (s)'}
-        gps_columns = [f'{Lat}', f'{Lon}', f'{LocTime}']
-        rename_gps_columns = {f'{Lat}': 'Latitude (°)', f'{Lon}': 'Longitude (°)', f'{LocTime}': 'Loc_Time (s)'}
-        #self.df = self.dlg.raw_file
+
+        # Use cached dialog config if available, otherwise use current dialog values
+        if cache_index is not None and cache_index in self.dialog_configs:
+            config = self.dialog_configs[cache_index]
+            bx, by, bz, bt, lat, lon, loc_time, mag_time, total_time, use_single_time = config
+        else:
+            bx = self.dlg.BX
+            by = self.dlg.BY
+            bz = self.dlg.BZ
+            bt = self.dlg.BT
+            lat = self.dlg.Lat
+            lon = self.dlg.Lon
+            loc_time = self.dlg.LocTime
+            mag_time = self.dlg.MagTime
+            total_time = self.dlg.TotalTime
+            use_single_time = self.dlg.SingleTime.isChecked()
+
+            # Cache the config for this file
+            if cache_index is not None:
+                self.dialog_configs[cache_index] = (bx, by, bz, bt, lat, lon, loc_time, mag_time, total_time, use_single_time)
+
+        if not bt:
+            mag_columns = [f'{bx}', f'{by}', f'{bz}']
+            rename_mag_columns = {f'{bx}': 'X (µT)', f'{by}': 'Y (µT)', f'{bz}': 'Z (µT)'}
+        else:
+            mag_columns = [f'{bt}']
+            rename_mag_columns = {f'{bt}': 'BT'}
+
+        # Handle time columns based on selection
+        if use_single_time:
+            time_columns = [f'{total_time}']
+            rename_time_columns = {f'{total_time}': 'Mag_Time (s)'}
+            gps_time_col = f'{total_time}'
+        else:
+            time_columns = [f'{mag_time}', f'{loc_time}']
+            rename_time_columns = {f'{mag_time}': 'Mag_Time (s)', f'{loc_time}': 'Loc_Time (s)'}
+            gps_time_col = f'{loc_time}'
+
+        mag_columns.extend(time_columns)
+        rename_mag_columns.update(rename_time_columns)
+
+        gps_columns = [f'{lat}', f'{lon}', gps_time_col]
+        rename_gps_columns = {f'{lat}': 'Latitude (°)', f'{lon}': 'Longitude (°)', gps_time_col: 'Loc_Time (s)'}
+
         self.df = df
-#        print(self.df)
 
         self.magdf = self.df[mag_columns]
         self.magdf = self.magdf.rename(columns=rename_mag_columns)
         self.gpsdf = self.df[gps_columns]
         self.gpsdf = self.gpsdf.rename(columns=rename_gps_columns)
-#        print(self.magdf)
-#        self.magdf.to_csv('magdf.csv')
-#        print(self.gpsdf)
-#        self.gpsdf.to_csv('gpsdf.csv')
+
+        # Cache magdf and gpsdf for orphan well processing
+        if cache_index is not None:
+            self.mag_gps_dfs[cache_index] = (self.magdf.copy(), self.gpsdf.copy())
 
         excelreader = er.ExcelReader(self.magdf, self.gpsdf)
-        self.df = excelreader.input_sheets()
+        self.df = excelreader.read_mag_field()
+        #self.df = excelreader.input_sheets()
         self.df = excelreader.interpolate()
         #self.df = excelreader.alignTime()
         self.df = excelreader.convertUTM()
         self.df = excelreader.distance()
+
+        # Cache the processed result before displaying
+        if cache_index is not None:
+            self.processed_dfs[cache_index] = self.df.copy()
+
         self.statusBar().showMessage(f'Successfully Loaded {self.file_paths}')
         self.plot_data(self.df)
         self.plot_table(self.df)
@@ -1292,6 +1496,14 @@ class MainWindow(QMainWindow):
             add_column = QAction(column, self)
             self.select_data.addAction(add_column)
             add_column.triggered.connect(lambda _, col=column: self.plot_changed(val=col))
+
+    def display_processed_df(self, df):
+        """Display a previously processed dataframe without re-processing"""
+        self.df = df
+        self.plot_tabs.clear()
+        self.statusBar().showMessage(f'Successfully Loaded {self.file_paths}')
+        self.plot_data(self.df)
+        self.plot_table(self.df)
 
     def plot_data(self, df, vmin=None, vmax=None, contour=None):
         #clears any previous figures from the canvas widget
@@ -1361,7 +1573,6 @@ class MainWindow(QMainWindow):
         plot_tabs.setLayout(plot_layout)
         plot_tabs.column = column
         plot_tabs.df = df
-        self.plot_layout.addWidget(plot_tabs)
         self.plot_tabs.addTab(plot_tabs, f'{name}')
         plot_canvas.draw()
 
