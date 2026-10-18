@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 from pathlib import Path
 from typing import Any
@@ -16,16 +17,34 @@ except Exception:  # pragma: no cover - fallback keeps the GUI importable.
     VMD = None
 
 
-WELL_LAT = 42.142823
-WELL_LON = -75.824952
-WGS84_TO_UTM18 = Transformer.from_crs("EPSG:4326", "EPSG:32618", always_xy=True)
-UTM18_TO_WGS84 = Transformer.from_crs("EPSG:32618", "EPSG:4326", always_xy=True)
+def utm_epsg(lat: float, lon: float) -> int:
+    """EPSG code of the WGS84 UTM zone containing (lat, lon), e.g. 32618 for zone 18N."""
+    zone = min(max(int((float(lon) + 180.0) // 6.0) + 1, 1), 60)
+    return (32600 if float(lat) >= 0 else 32700) + zone
+
+
+def utm_zone_label(epsg: int) -> str:
+    """Readable zone name for an EPSG code from utm_epsg, e.g. '18N'."""
+    return f"{epsg % 100}{'N' if epsg < 32700 else 'S'}"
+
+
+@lru_cache(maxsize=None)
+def _utm_transformers(epsg: int) -> tuple[Transformer, Transformer]:
+    to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
+    to_wgs84 = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
+    return to_utm, to_wgs84
+
+
+def survey_epsg(df: pd.DataFrame) -> int:
+    """UTM zone chosen for a survey by clean_survey, stored so every step uses the same zone."""
+    return int(df["UTM_EPSG"].iloc[0])
 
 
 @dataclass
 class OrphanWellParams:
-    well_lat: float = WELL_LAT
-    well_lon: float = WELL_LON
+    #optional coordinates of a known well, used only for display and offsets, never for candidate selection
+    well_lat: float | None = None
+    well_lon: float | None = None
     startup_samples: int = 10
     spatial_mad_multiplier: float = 6.0
     window_length_m: float = 5.0
@@ -39,10 +58,30 @@ class OrphanWellParams:
     support_fraction: float = 0.30
     min_support_points: int = 5
 
+    @property
+    def reference_known(self) -> bool:
+        return self.well_lat is not None and self.well_lon is not None
 
-def well_utm(params: OrphanWellParams) -> tuple[float, float]:
-    east, north = WGS84_TO_UTM18.transform(params.well_lon, params.well_lat)
+
+def well_utm(params: OrphanWellParams, epsg: int) -> tuple[float, float] | None:
+    """Known well position in the survey's UTM zone, or None if no well was entered."""
+    if not params.reference_known:
+        return None
+    east, north = _utm_transformers(epsg)[0].transform(params.well_lon, params.well_lat)
     return float(east), float(north)
+
+
+def add_well_distance(df: pd.DataFrame, params: OrphanWellParams) -> pd.DataFrame:
+    """Add each point's distance to the entered reference well, if one was entered."""
+    well = well_utm(params, survey_epsg(df))
+    if well is None:
+        return df
+    out = df.copy()
+    out["Distance_to_Well_m"] = np.hypot(
+        out["Easting (m)"].to_numpy(dtype=float) - well[0],
+        out["Northing (m)"].to_numpy(dtype=float) - well[1],
+    )
+    return out
 
 
 def _flat_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -171,12 +210,17 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellPar
     if startup:
         interpolated = interpolated.iloc[startup:].reset_index(drop=True)
 
-    east, north = WGS84_TO_UTM18.transform(
-        interpolated["Longitude (°)"].to_numpy(dtype=float),
-        interpolated["Latitude (°)"].to_numpy(dtype=float),
-    )
+    if interpolated.empty:
+        raise ValueError("No magnetometer samples fall within the GPS time range, so no positions could be assigned.")
+
+    #one UTM zone for the whole survey, from its median position, so distances stay consistent
+    point_lon = interpolated["Longitude (°)"].to_numpy(dtype=float)
+    point_lat = interpolated["Latitude (°)"].to_numpy(dtype=float)
+    epsg = utm_epsg(np.nanmedian(point_lat), np.nanmedian(point_lon))
+    east, north = _utm_transformers(epsg)[0].transform(point_lon, point_lat)
     interpolated["Easting (m)"] = east
     interpolated["Northing (m)"] = north
+    interpolated["UTM_EPSG"] = epsg
 
     med_e = float(np.nanmedian(east))
     med_n = float(np.nanmedian(north))
@@ -190,7 +234,6 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellPar
     keep = radial <= limit
     cleaned = interpolated.loc[keep].reset_index(drop=True)
 
-    cleaned = update_well_columns(cleaned, params)
     cleaned["Time (s)"] = cleaned["Mag_Time (s)"]
     cleaned["BT"] = cleaned["Total_Field_uT"]
     cleaned["easting"] = cleaned["Easting (m)"]
@@ -214,17 +257,6 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellPar
 def load_and_clean(path: str | Path, params: OrphanWellParams) -> tuple[pd.DataFrame, dict[str, Any]]:
     magdf, gpsdf = read_survey_file(path)
     return clean_survey(magdf, gpsdf, params)
-
-
-def update_well_columns(df: pd.DataFrame, params: OrphanWellParams) -> pd.DataFrame:
-    out = df.copy()
-    well_e, well_n = well_utm(params)
-    out["Well_Easting_m"] = well_e
-    out["Well_Northing_m"] = well_n
-    out["Delta_E_m"] = out["Easting (m)"].to_numpy(dtype=float) - well_e
-    out["Delta_N_m"] = out["Northing (m)"].to_numpy(dtype=float) - well_n
-    out["Distance_to_Well_m"] = np.sqrt(out["Delta_E_m"] ** 2 + out["Delta_N_m"] ** 2)
-    return out
 
 
 def robust_mad(values: np.ndarray | pd.Series) -> float:
@@ -388,7 +420,7 @@ def analyze_with_cached_modes(
     selected_modes: list[int],
     params: OrphanWellParams,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
-    ordered = update_well_columns(clean_df.sort_values("Time (s)").reset_index(drop=True), params)
+    ordered = clean_df.sort_values("Time (s)").reset_index(drop=True)
     speed_med, dt_med = median_speed_and_dt(ordered)
     window = window_count_for_length(params.window_length_m, speed_med, dt_med)
     step = max(1, int(round(window * float(params.step_ratio))))
@@ -406,7 +438,6 @@ def analyze_with_cached_modes(
             "n_m": base["Northing (m)"].to_numpy(dtype=float),
             "latitude": base["Latitude (°)"].to_numpy(dtype=float),
             "longitude": base["Longitude (°)"].to_numpy(dtype=float),
-            "distance_to_well_m": base["Distance_to_Well_m"].to_numpy(dtype=float),
             "score": scores,
             "threshold": threshold,
             "threshold_margin": scores - threshold,
@@ -416,12 +447,12 @@ def analyze_with_cached_modes(
     for col in contrib.columns:
         if col != "score":
             score_points[col] = contrib[col].to_numpy(dtype=float)
-    score_points, clusters = cluster_hits(score_points, params)
+    score_points, clusters = cluster_hits(score_points, params, survey_epsg(ordered))
     summary = summarize_analysis(ordered, score_points, clusters, selected_modes, params, window, step, threshold)
     return score_points, clusters, summary
 
 
-def cluster_hits(score_points: pd.DataFrame, params: OrphanWellParams) -> tuple[pd.DataFrame, pd.DataFrame]:
+def cluster_hits(score_points: pd.DataFrame, params: OrphanWellParams, epsg: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     out = score_points.copy()
     out["cluster_label"] = -1
     out["cluster_rank"] = np.nan
@@ -432,7 +463,7 @@ def cluster_hits(score_points: pd.DataFrame, params: OrphanWellParams) -> tuple[
     labels = DBSCAN(eps=float(params.dbscan_eps_m), min_samples=int(params.dbscan_min_samples)).fit_predict(hit_xy)
     out.loc[hit_idx, "cluster_label"] = labels
 
-    well_e, well_n = well_utm(params)
+    well = well_utm(params, epsg)
     cluster_rows = []
     for label in sorted(set(labels)):
         if label < 0:
@@ -458,7 +489,7 @@ def cluster_hits(score_points: pd.DataFrame, params: OrphanWellParams) -> tuple[
         else:
             elongation = math.nan
             orientation = math.nan
-        lon, lat = UTM18_TO_WGS84.transform(centroid_e, centroid_n)
+        lon, lat = _utm_transformers(epsg)[1].transform(centroid_e, centroid_n)
         cluster_rows.append(
             {
                 "cluster_label": int(label),
@@ -471,7 +502,9 @@ def cluster_hits(score_points: pd.DataFrame, params: OrphanWellParams) -> tuple[
                 "uncertainty_radius_m": radius,
                 "elongation_ratio": elongation,
                 "orientation_deg": orientation,
-                "dist_to_well_m": float(math.hypot(centroid_e - well_e, centroid_n - well_n)),
+                "dist_to_well_m": (
+                    float(math.hypot(centroid_e - well[0], centroid_n - well[1])) if well is not None else math.nan
+                ),
             }
         )
     clusters = pd.DataFrame(cluster_rows)
@@ -518,10 +551,12 @@ def summarize_analysis(
             "candidate_radius_m": float(row["uncertainty_radius_m"]),
             "candidate_points": int(row["n_points"]),
             "candidate_peak_score": float(row["peak_score"]),
-            "candidate_distance_to_well_m": float(row["dist_to_well_m"]),
         }
+        if params.reference_known:
+            candidate["candidate_distance_to_well_m"] = float(row["dist_to_well_m"])
     summary = {
         "n_samples": int(len(clean_df)),
+        "utm_zone": utm_zone_label(survey_epsg(clean_df)),
         "selected_modes": ";".join(str(mode) for mode in selected_modes),
         "window_samples": int(window),
         "step_samples": int(step),

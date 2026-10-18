@@ -8,7 +8,7 @@ class PlotData:
         self.df = df
         self.fig = None
 
-    def plot(self, color=None, size=None, x=None, val=None, xmin=None, xmax=None, ymin=None, ymax=None, ax=None):
+    def plot(self, color=None, size=None, x=None, val=None, xmin=None, xmax=None, ymin=None, ymax=None, ax=None, title=None):
         if val is None:
             val = self.df['BT']
             data = val.values
@@ -34,7 +34,9 @@ class PlotData:
         ax.scatter(x, data, color=color, edgecolor='black')
         ax.set_xlim(xmin, xmax)
         ax.set_ylim(ymin, ymax)
-        ax.set_title('Total Magnetic Field v Time')
+        if title is None:
+            title = 'Total Magnetic Field v Time'
+        ax.set_title(title)
         ax.set_ylabel(f'{val.name}')
         ax.set_xlabel('Time (s)')
 

@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from scipy.fft import ifft2, fft2, fftfreq
 from scipy.interpolate import griddata
+from scipy.ndimage import distance_transform_edt
 import ppigrf
 import datetime as dt
 import harmonica as hm
@@ -159,8 +160,11 @@ class MapFilter:
         ucdata = upward_config * forward
 
         #inverse FFT to transform data back to original domain
-        upwardcontinuation = pd.DataFrame(np.real(ifft2(ucdata)), columns=['BT'])
-        df = pd.concat([upwardcontinuation, self.df[['Longitude (°)', 'Latitude (°)']]], axis=1)
+        upwardcontinuation = np.real(ifft2(ucdata)).ravel()
+        #keep every original column so the result can be exported and plotted over time
+        df = self.df.copy()
+        df['Upward_BT'] = upwardcontinuation
+        df['BT'] = upwardcontinuation
         return df
 
     def downward_continuation(self, H):
@@ -195,8 +199,11 @@ class MapFilter:
         dcdata = downward_config * forward
 
         #inverse FFT to transform data back to original domain
-        downwardcontinuation = pd.DataFrame(np.real(ifft2(dcdata)), columns=['BT'])
-        df = pd.concat([downwardcontinuation, self.df[['Longitude (°)', 'Latitude (°)']]], axis=1)
+        downwardcontinuation = np.real(ifft2(dcdata)).ravel()
+        #keep every original column so the result can be exported and plotted over time
+        df = self.df.copy()
+        df['Downward_BT'] = downwardcontinuation
+        df['BT'] = downwardcontinuation
         return df
 
     def reduction_to_pole(self, year, month, day):
@@ -236,6 +243,91 @@ class MapFilter:
         #masking the NaN values in the RTP data
         rtp = rtp.where(~nan_mask, np.nan)
         return rtp, lon_mesh, lat_mesh
+
+    def _with_residual(self, background):
+        '''Copy of the data with BT replaced by BT minus the given background (µT).'''
+        out = self.df.copy()
+        out['Background_BT'] = background
+        out['Residual_BT'] = out['BT'].to_numpy(dtype=float) - background
+        out['BT'] = out['Residual_BT']
+        return out
+
+    def residual_trend(self, outlier_mad=3.0, iterations=3):
+        '''Removes a planar background trend fitted to the survey itself, leaving local anomalies.
+
+        Strong anomalies are left out of the fit (beyond outlier_mad robust standard
+        deviations) so they don't tilt the background.
+
+        Returns
+        -------
+        df : pandas.DataFrame
+            Copy of the dataset with BT replaced by the residual, plus Background_BT and Residual_BT.
+        '''
+        lat = self.df['Latitude (°)'].to_numpy(dtype=float)
+        lon = self.df['Longitude (°)'].to_numpy(dtype=float)
+        bt = self.df['BT'].to_numpy(dtype=float)
+        #local east/north offsets in metres, accurate enough for fitting a plane
+        lat0, lon0 = np.nanmean(lat), np.nanmean(lon)
+        x = (lon - lon0) * 111320.0 * np.cos(np.radians(lat0))
+        y = (lat - lat0) * 110540.0
+        design = np.column_stack([np.ones_like(x), x, y])
+        fit_mask = np.isfinite(bt) & np.isfinite(x) & np.isfinite(y)
+        if fit_mask.sum() < 3:
+            raise ValueError('Not enough valid points to fit a background trend.')
+        valid = fit_mask.copy()
+        for _ in range(iterations):
+            coef, *_ = np.linalg.lstsq(design[fit_mask], bt[fit_mask], rcond=None)
+            resid = bt - design @ coef
+            center = np.nanmedian(resid[valid])
+            mad = 1.4826 * np.nanmedian(np.abs(resid[valid] - center))
+            if not mad > 0:
+                break
+            new_mask = valid & (np.abs(resid - center) <= outlier_mad * mad)
+            if new_mask.sum() < 3 or np.array_equal(new_mask, fit_mask):
+                break
+            fit_mask = new_mask
+        return self._with_residual(design @ coef)
+
+    def residual_igrf(self, year, month, day):
+        '''Removes the IGRF model Earth field for each point's location on the survey date.
+
+        Returns
+        -------
+        df : pandas.DataFrame
+            Copy of the dataset with BT replaced by the residual, plus Background_BT and Residual_BT.
+        '''
+        date = pd.Timestamp(dt.date(year=year, month=month, day=day))
+        lat = self.df['Latitude (°)'].to_numpy(dtype=float)
+        lon = self.df['Longitude (°)'].to_numpy(dtype=float)
+        Be, Bn, Bu = ppigrf.igrf(lon=lon, lat=lat, h=0, date=date)
+        #IGRF is in nT, BT is in µT
+        background = np.sqrt(Be ** 2 + Bn ** 2 + Bu ** 2).ravel() / 1000.0
+        return self._with_residual(background)
+
+    def reduction_to_pole_points(self, year, month, day):
+        '''Applies reduction to pole and samples the gridded result back at the
+        survey points, so the output matches the other filters.
+
+        Returns
+        -------
+        df : pandas.DataFrame
+            Copy of the input dataset with BT replaced by the RTP values.
+        '''
+        rtp, _lon_mesh, _lat_mesh = self.reduction_to_pole(year=year, month=month, day=day)
+        #survey points on the edge of the area sit next to masked grid cells,
+        #so fill masked cells from the closest valid cell before sampling
+        grid = rtp.values
+        masked = np.isnan(grid)
+        if masked.any() and not masked.all():
+            nearest_idx = distance_transform_edt(masked, return_distances=False, return_indices=True)
+            rtp = rtp.copy(data=grid[tuple(nearest_idx)])
+        points_lon = xr.DataArray(self.df['Longitude (°)'].values, dims='points')
+        points_lat = xr.DataArray(self.df['Latitude (°)'].values, dims='points')
+        rtp_values = rtp.interp(longitude=points_lon, latitude=points_lat).values
+        out = self.df.copy()
+        out['RTP_BT'] = rtp_values
+        out['BT'] = rtp_values
+        return out
 
     # #def first_vertical_derivative(self):
 
