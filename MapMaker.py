@@ -264,7 +264,8 @@ class MapMaker:
         return df
 
     def showMap(self, df, contour=False, ax=None, vmin=None, vmax=None, cax=None,
-                    pts=False, cmap='viridis', xlab='x', ylab='y', levels=[]):
+                    pts=False, cmap='viridis', xlab='x', ylab='y', levels=[],
+                    cbar_label='Total Magnetic Field [uT]'):
             """ Display a map of the measurements.
 
             Parameters
@@ -309,7 +310,8 @@ class MapMaker:
  #           ax.set_title(coil)
             if contour is True:
                 if len(levels) == 0:
-                    levels = np.linspace(vmin, vmax, 8, dtype=int)
+                    #not rounded to whole µT, which repeated levels and failed for ranges under ~7 µT
+                    levels = np.linspace(vmin, vmax, 8)
                 # cax = ax.tricontourf(x, y, val, levels=levels, extend='both', cmap=cmap)
                 cax = self.tricontourf_clipped(x, y, val, ax=ax, levels=levels, extend='both', cmap=cmap)
                 if pts is True:
@@ -325,7 +327,7 @@ class MapMaker:
             ax.get_yaxis().get_major_formatter().set_useOffset(False)
             ax.get_xaxis().get_major_formatter().set_scientific(False)
             ax.get_yaxis().get_major_formatter().set_scientific(False)
-            fig.colorbar(cax, ax=ax, label='Total Magnetic Field [uT]')
+            fig.colorbar(cax, ax=ax, label=cbar_label)
             if ax is None:
                 return fig
 

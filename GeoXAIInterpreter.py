@@ -101,7 +101,7 @@ def explain_candidate(
     score_points: pd.DataFrame,
     clusters: pd.DataFrame,
     summary: dict[str, Any],
-    reference_known: bool,
+    reference_known: bool = False,
 ) -> GeoXAIReport:
     cluster_scores = score_clusters(score_points, clusters)
     contributions = selected_contributions(cluster_scores)
@@ -128,13 +128,14 @@ def explain_candidate(
 
     if reference_known:
         reference_text = (
-            f"The entered reference well is used only as validation/context here. "
+            "The entered reference well is used only as validation/context here; it does not affect which "
+            "candidate is selected. "
             f"The selected candidate is {summary.get('candidate_distance_to_well_m', 0.0):.2f} m from that point."
         )
         mode = "Known-reference interpretation"
     else:
         reference_text = (
-            "No true well location is assumed. The candidate is selected from the magnetic anomaly evidence, "
+            "The candidate well location is estimated from the magnetic anomaly evidence, "
             "cluster support, compactness, and uncertainty. Any entered coordinate is treated as a map/search context, "
             "not ground truth."
         )
