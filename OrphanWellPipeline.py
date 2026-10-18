@@ -103,8 +103,8 @@ def _standardize_magnetometer(df: pd.DataFrame) -> pd.DataFrame:
     y_col = _find_column(df, ["Y (uT)", "Y (µT)", "Magnetic field y (uT)", "Magnetometer_Y (uT)", "BY"])
     z_col = _find_column(df, ["Z (uT)", "Z (µT)", "Magnetic field z (uT)", "Magnetometer_Z (uT)", "BZ"])
     out = df[[time_col, x_col, y_col, z_col]].copy()
-    out.columns = ["Mag_Time (s)", "X (uT)", "Y (uT)", "Z (uT)"]
-    return _coerce_numeric(out).dropna(subset=["Mag_Time (s)", "X (uT)", "Y (uT)", "Z (uT)"])
+    out.columns = ["Mag_Time (s)", "X (µT)", "Y (µT)", "Z (µT)"]
+    return _coerce_numeric(out).dropna(subset=["Mag_Time (s)", "X (µT)", "Y (µT)", "Z (µT)"])
 
 
 def _standardize_location(df: pd.DataFrame) -> pd.DataFrame:
@@ -113,8 +113,8 @@ def _standardize_location(df: pd.DataFrame) -> pd.DataFrame:
     lat_col = _find_column(df, ["Latitude (degree)", "Latitude (°)", "Location_Latitude (°)", "latitude", "lat"])
     lon_col = _find_column(df, ["Longitude (degree)", "Longitude (°)", "Location_Longitude (°)", "longitude", "lon"])
     out = df[[time_col, lat_col, lon_col]].copy()
-    out.columns = ["Loc_Time (s)", "Latitude (deg)", "Longitude (deg)"]
-    return _coerce_numeric(out).dropna(subset=["Loc_Time (s)", "Latitude (deg)", "Longitude (deg)"])
+    out.columns = ["Loc_Time (s)", "Latitude (°)", "Longitude (°)"]
+    return _coerce_numeric(out).dropna(subset=["Loc_Time (s)", "Latitude (°)", "Longitude (°)"])
 
 
 def _find_standard_sheet(sheets: dict[str, pd.DataFrame], kind: str) -> pd.DataFrame | None:
@@ -153,27 +153,27 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellPar
 
     mag = mag.sort_values("Mag_Time (s)").drop_duplicates("Mag_Time (s)").reset_index(drop=True)
     gps = gps.sort_values("Loc_Time (s)").drop_duplicates("Loc_Time (s)").reset_index(drop=True)
-    mag["Total_Field_uT"] = np.sqrt(mag["X (uT)"] ** 2 + mag["Y (uT)"] ** 2 + mag["Z (uT)"] ** 2)
+    mag["Total_Field_uT"] = np.sqrt(mag["X (µT)"] ** 2 + mag["Y (µT)"] ** 2 + mag["Z (µT)"] ** 2)
 
     gt = gps["Loc_Time (s)"].to_numpy(dtype=float)
     mt = mag["Mag_Time (s)"].to_numpy(dtype=float)
-    lat = gps["Latitude (deg)"].to_numpy(dtype=float)
-    lon = gps["Longitude (deg)"].to_numpy(dtype=float)
+    lat = gps["Latitude (°)"].to_numpy(dtype=float)
+    lon = gps["Longitude (°)"].to_numpy(dtype=float)
     valid = (mt >= np.nanmin(gt)) & (mt <= np.nanmax(gt))
-    mag["Latitude (deg)"] = np.nan
-    mag["Longitude (deg)"] = np.nan
-    mag.loc[valid, "Latitude (deg)"] = np.interp(mt[valid], gt, lat)
-    mag.loc[valid, "Longitude (deg)"] = np.interp(mt[valid], gt, lon)
+    mag["Latitude (°)"] = np.nan
+    mag["Longitude (°)"] = np.nan
+    mag.loc[valid, "Latitude (°)"] = np.interp(mt[valid], gt, lat)
+    mag.loc[valid, "Longitude (°)"] = np.interp(mt[valid], gt, lon)
 
-    interpolated = mag.dropna(subset=["Latitude (deg)", "Longitude (deg)"]).reset_index(drop=True)
+    interpolated = mag.dropna(subset=["Latitude (°)", "Longitude (°)"]).reset_index(drop=True)
     before_startup = len(interpolated)
     startup = max(0, int(params.startup_samples))
     if startup:
         interpolated = interpolated.iloc[startup:].reset_index(drop=True)
 
     east, north = WGS84_TO_UTM18.transform(
-        interpolated["Longitude (deg)"].to_numpy(dtype=float),
-        interpolated["Latitude (deg)"].to_numpy(dtype=float),
+        interpolated["Longitude (°)"].to_numpy(dtype=float),
+        interpolated["Latitude (°)"].to_numpy(dtype=float),
     )
     interpolated["Easting (m)"] = east
     interpolated["Northing (m)"] = north
@@ -193,8 +193,6 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellPar
     cleaned = update_well_columns(cleaned, params)
     cleaned["Time (s)"] = cleaned["Mag_Time (s)"]
     cleaned["BT"] = cleaned["Total_Field_uT"]
-    cleaned["Latitude (°)"] = cleaned["Latitude (deg)"]
-    cleaned["Longitude (°)"] = cleaned["Longitude (deg)"]
     cleaned["easting"] = cleaned["Easting (m)"]
     cleaned["northing"] = cleaned["Northing (m)"]
     cleaned["Distance (m)"] = np.sqrt(
@@ -406,8 +404,8 @@ def analyze_with_cached_modes(
             "t_center_s": base["Time (s)"].to_numpy(dtype=float),
             "e_m": base["Easting (m)"].to_numpy(dtype=float),
             "n_m": base["Northing (m)"].to_numpy(dtype=float),
-            "latitude": base["Latitude (deg)"].to_numpy(dtype=float),
-            "longitude": base["Longitude (deg)"].to_numpy(dtype=float),
+            "latitude": base["Latitude (°)"].to_numpy(dtype=float),
+            "longitude": base["Longitude (°)"].to_numpy(dtype=float),
             "distance_to_well_m": base["Distance_to_Well_m"].to_numpy(dtype=float),
             "score": scores,
             "threshold": threshold,
