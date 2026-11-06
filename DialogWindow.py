@@ -14,7 +14,7 @@ class CustomDialog(QDialog):
         super().__init__(parent)
 
         #sets the title for the pop up dialog window
-        self.setWindowTitle("Add/Edit File")
+        self.setWindowTitle("Import magnetic survey")
 
         #creates the layouts for the window
         self.layout = QVBoxLayout()
@@ -184,18 +184,18 @@ class CustomDialog(QDialog):
        self.select_file()
 
    def select_file(self):
-       #assigns the file path selected by the user to a stored variable
-       #filter to show CSV and Excel files by default
-       self.file_paths, _ = QFileDialog.getOpenFileNames(parent=self,
-                                                         caption='Select File(s)',
-                                                         filter='Dataset Files (*.csv *.xls *.xlsx *.txt)')
-       #only occurs if a file is selected by the user
-       if self.file_paths:
-           #removes the [brackets] placed on filepath for the users
-           self.file_path_shown = str(self.file_paths).strip('[]')
-           self.FileName.setText(f'{self.file_path_shown}')
-
+       path, _ = QFileDialog.getOpenFileName(self, 'Import survey', '',
+           'Survey files (*.csv *.txt *.xls *.xlsx *.xlsm)')
+       if not path:
+           return
+       self.file_paths = [path]
+       self.FileName.setText(path)
+       try:
            self.read_file()
+       except Exception as exc:
+           self.file_paths = []
+           self.raw_file = None
+           QMessageBox.warning(self, 'Survey import', str(exc))
 
    def read_file(self):
         # read raw file and import the column headers into the drop-down menus
@@ -215,7 +215,7 @@ class CustomDialog(QDialog):
             self.FileType_CSV.setChecked(True)
 
         # read Excel files (concatenate all sheets)
-        elif ext in ('.xls', '.xlsx'):
+        elif ext in ('.xls', '.xlsx', '.xlsm'):
             df = pd.concat(pd.read_excel(path, sheet_name=None), axis=1)
             # flatten MultiIndex columns if present
             if isinstance(df.columns, pd.MultiIndex):
@@ -246,36 +246,69 @@ class CustomDialog(QDialog):
             for combo in (self.XMagField, self.YMagField, self.ZMagField,
                           self.XLatitude, self.YLongitude, self.TotalMagField,
                           self.MagTime, self.LocTime, self.TotalTime):
-                combo.addItem(str(column), columns)
+                combo.addItem(str(column))
 
+        for combo in (self.XMagField, self.YMagField, self.ZMagField,
+                      self.XLatitude, self.YLongitude, self.TotalMagField,
+                      self.MagTime, self.LocTime, self.TotalTime):
+            combo.setCurrentIndex(-1)
+        self.suggest_columns()
         self.sample_data()
 
 
+   def suggest_columns(self):
+       import OrphanWellPipeline as ow
+       def choose(combo, aliases):
+           found = ow._find_column(self.raw_file, aliases, required=False)
+           if found is not None:
+               combo.setCurrentText(str(found))
+       for combo, aliases in [
+           (self.XMagField, ['Magnetometer_X (uT)', 'X (uT)', 'BX']),
+           (self.YMagField, ['Magnetometer_Y (uT)', 'Y (uT)', 'BY']),
+           (self.ZMagField, ['Magnetometer_Z (uT)', 'Z (uT)', 'BZ']),
+           (self.TotalMagField, ['BT', 'Total_Field_uT', 'Total magnetic field (uT)']),
+           (self.XLatitude, ['Location_Latitude (degree)', 'latitude', 'lat']),
+           (self.YLongitude, ['Location_Longitude (degree)', 'longitude', 'lon']),
+           (self.MagTime, ['Magnetometer_Time (s)', 'Mag_Time (s)', 'Time (s)']),
+           (self.LocTime, ['Location_Time (s)', 'Loc_Time (s)', 'Time (s)']),
+           (self.TotalTime, ['Time (s)', 'time']),
+       ]:
+           choose(combo, aliases)
+       if all(combo.currentIndex() >= 0 for combo in (self.XMagField, self.YMagField, self.ZMagField)):
+           self.VectorMag.setChecked(True)
+       elif self.TotalMagField.currentIndex() >= 0:
+           self.ScalarMag.setChecked(True)
+       if self.MagTime.currentText() == self.LocTime.currentText() and self.MagTime.currentIndex() >= 0:
+           self.SingleTime.setChecked(True)
+           self.TotalTime.setCurrentText(self.MagTime.currentText())
+
+   def build_streams(self):
+       if not getattr(self, 'file_paths', None) or getattr(self, 'raw_file', None) is None:
+           raise ValueError('Select a survey file first.')
+       def selected(combo):
+           text = combo.currentText()
+           if combo.currentIndex() < 0 or text not in self.raw_file.columns:
+               raise ValueError('Assign all required magnetic, coordinate, and time fields.')
+           return text
+       mag_time = selected(self.TotalTime if self.SingleTime.isChecked() else self.MagTime)
+       gps_time = selected(self.TotalTime if self.SingleTime.isChecked() else self.LocTime)
+       magnetic_columns = [selected(combo) for combo in
+                           ((self.XMagField, self.YMagField, self.ZMagField) if self.VectorMag.isChecked()
+                            else (self.TotalMagField,))]
+       if self.VectorMag.isChecked() and len(set(magnetic_columns)) != 3:
+           raise ValueError('Assign a different column to each magnetic component.')
+       lat, lon = selected(self.XLatitude), selected(self.YLongitude)
+       if lat == lon:
+           raise ValueError('Latitude and longitude must use different columns.')
+       mag = self.raw_file[[mag_time] + magnetic_columns].copy()
+       mag.columns = ['Mag_Time (s)'] + (['X (µT)', 'Y (µT)', 'Z (µT)'] if self.VectorMag.isChecked() else ['BT'])
+       gps = self.raw_file[[gps_time, lat, lon]].copy()
+       gps.columns = ['Loc_Time (s)', 'Latitude (°)', 'Longitude (°)']
+       return mag, gps
+
    def assign_variables(self):
-        self.BX = self.XMagField.currentText()
-        self.BY = self.YMagField.currentText()
-        self.BZ = self.ZMagField.currentText()
-        self.Lat = self.XLatitude.currentText()
-        self.Lon = self.YLongitude.currentText()
-        self.BT = self.TotalMagField.currentText()
-        self.TotalTime = self.TotalTime.currentText()
-        self.MagTime = self.MagTime.currentText()
-        self.LocTime = self.LocTime.currentText()
-
-        if self.VectorMag.isChecked():
-            mag_data = [self.BX, self.BY, self.BZ]
-        elif self.ScalarMag.isChecked():
-            mag_data = [self.BT]
-
-        if self.SingleTime.isChecked():
-            time_data = [self.TotalTime]
-        elif self.ComboTime.isChecked():
-            time_data = [self.MagTime, self.LocTime]
-
-        coord_data = [self.Lat, self.Lon]
-        data = mag_data + time_data + coord_data
-
-        self.raw_file = self.raw_file[data]
+       # Compatibility: validate without trimming the table or replacing widget attributes.
+       return self.build_streams()
 
 #       need to reset when new file selected
 

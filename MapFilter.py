@@ -47,85 +47,24 @@ class MapFilter:
         return 1.0
 
     def variational_mode_decomposition(self, k_modes=10, alpha=2000.0, max_modes=2):
-        """Applies a VMD anomaly-component reconstruction to the BT column.
-
-        The filter decomposes the median-centered total field, ranks modes by
-        energy, spectral flatness, and dominant rate, then reconstructs BT from
-        the selected non-trend and non-noise modes plus the original baseline.
-        """
-        if VMD is None:
-            raise ImportError("The vmdpy package is required for the VMD filter.")
-        if "BT" not in self.df.columns:
-            raise ValueError("The VMD filter requires a BT column.")
-
-        out = self.df.copy()
-        signal = pd.to_numeric(out["BT"], errors="coerce")
-        if signal.notna().sum() < max(int(k_modes) * 4, 20):
-            raise ValueError("Not enough valid BT samples for VMD filtering.")
-
-        filled = signal.interpolate(limit_direction="both").fillna(signal.median()).to_numpy(dtype=float)
-        baseline = float(np.nanmedian(filled))
-        centered = filled - baseline
-
-        modes, _, _ = VMD(
-            centered,
-            alpha=float(alpha),
-            tau=0.0,
-            K=int(k_modes),
-            DC=0,
-            init=1,
-            tol=1e-7,
-        )
-        modes = np.asarray(modes, dtype=float)
-
-        dt_seconds = self._median_sample_interval(out)
-        rates = [self._dominant_rate(mode, dt_seconds) for mode in modes]
-        order = np.argsort(rates)
-        modes = modes[order]
-
-        raw_var = float(np.nanvar(centered)) or 1.0
-        rows = []
-        for i, mode in enumerate(modes, start=1):
-            rows.append(
-                {
-                    "mode": i,
-                    "energy_ratio": float(np.nanvar(mode) / raw_var),
-                    "dominant_rate_hz": self._dominant_rate(mode, dt_seconds),
-                    "spectral_flatness": self._spectral_flatness(mode),
-                    "original_vmd_order_zero_based": int(order[i - 1]),
-                }
-            )
-        metrics = pd.DataFrame(rows)
-        er = metrics["energy_ratio"].to_numpy(dtype=float)
-        fr = metrics["dominant_rate_hz"].to_numpy(dtype=float)
-        sf = metrics["spectral_flatness"].to_numpy(dtype=float)
-        metrics["noise_like"] = (sf > np.nanpercentile(sf, 80)) & (er < np.nanmedian(er))
-        metrics["trend_like"] = fr <= max(0.001, np.nanpercentile(fr, 10))
-        metrics["extreme_high_rate"] = fr >= np.nanpercentile(fr, 95)
-
-        candidates = metrics[
-            (~metrics["noise_like"]) & (~metrics["trend_like"]) & (~metrics["extreme_high_rate"])
-        ].copy()
-        candidates = candidates[candidates["energy_ratio"] >= max(0.035, float(metrics["energy_ratio"].median()))]
-        if candidates.empty:
-            candidates = metrics[~metrics["trend_like"]].copy()
-        if candidates.empty:
-            candidates = metrics.copy()
-        candidates["rank_score"] = candidates["energy_ratio"] * (
-            1.0 - candidates["spectral_flatness"].clip(0, 0.95)
-        )
-        selected_modes = sorted(
-            candidates.sort_values("rank_score", ascending=False).head(int(max_modes))["mode"].astype(int).tolist()
-        )
-        metrics["selected"] = metrics["mode"].isin(selected_modes)
-
-        selected_idx = [mode - 1 for mode in selected_modes]
-        reconstructed = modes[selected_idx].sum(axis=0) + baseline
-        if "BT_Original" not in out.columns:
-            out["BT_Original"] = signal
-        out["VMD_Filtered_BT"] = reconstructed
-        out["BT"] = reconstructed
-        return out, selected_modes, metrics
+        import OrphanWellPipeline as ow
+        if ow.VMD is None:
+            raise ImportError('The vmdpy package is required for the VMD map filter.')
+        out = self.df.copy(deep=True)
+        if len(out) < max(int(k_modes) * 4, 20):
+            raise ValueError('Not enough samples for VMD filtering.')
+        params = ow.OrphanWellParams(vmd_modes=int(k_modes), vmd_alpha=float(alpha),
+                                    max_selected_modes=int(max_modes))
+        signal = pd.to_numeric(out['BT'], errors='coerce').to_numpy(dtype=float)
+        if not np.isfinite(signal).all():
+            raise ValueError('VMD needs finite magnetic values.')
+        modes, metrics, selected = ow.run_vmd_modes(out, params, field_column='BT')
+        reconstructed = modes[[mode - 1 for mode in selected]].sum(axis=0) + float(np.median(signal))
+        if 'BT_Original' not in out.columns:
+            out['BT_Original'] = out['BT']
+        out['VMD_Filtered_BT'] = reconstructed
+        out['BT'] = reconstructed
+        return out, selected, metrics
 
     def upward_continuation(self, H):
         '''Applies the Upward Continuation filter to FFT time-domain data.

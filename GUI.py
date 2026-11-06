@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QLabel, QMainWindow,
                              QSplitter, QScrollArea)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 from matplotlib.figure import Figure
 import pandas as pd
 import numpy as np
@@ -18,7 +18,12 @@ import matplotlib.pyplot as plt
 import folium
 import branca.colormap as cm
 from pathlib import Path
-import ExcelReader as er
+from SurveySession import SurveySession
+from ProjectTools import ProjectTools
+from PlotTheme import compact_toolbar
+from FilterWorkspace import FilterWorkspace
+from DataWorkspace import DataWorkspace
+from VMDPanel import VMDPanel
 import MapFilter as mf
 import MapMaker as mm
 import DialogWindow as dw
@@ -27,7 +32,7 @@ import WebMap as wm
 import TableModel
 import OrphanWellPipeline as ow
 import GeoXAIInterpreter as gx
-import sys, os, tempfile
+import sys, os, tempfile, json
 
 #choices in the Map View dropdown
 POINT_MAP = 'Point Map'
@@ -78,20 +83,31 @@ class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super(MainWindow, self).__init__(parent)
         self.initUI()
+        self.sessions = []
         self.df_list = list()
         self.processed_dfs = {}  # Cache for processed dataframes
         self.dialog_configs = {}  # Cache for dialog config per file index
         self.mag_gps_dfs = {}  # Cache for magdf/gpsdf per file index
-        self.active_dataset_index = None  # df_list index of the dataset shown on the map
+        self.active_dataset_index = None
+        self.current_df = None
+        self.vmin = self.vmax = None
+        self.df = None
+        self._analysis_mode_key = None  # df_list index of the dataset shown on the map
         self.active_filters = []  # filters applied to the mapped data, in order, for plot titles
         self.map_vmin = None  # color scale on the regular map, shared with the web map
         self.map_vmax = None
         self.residual_date = None  # (year, month, day) used for the IGRF residual
         self.residual_cache = None  # (source df, settings, residual df) so redraws don't recompute
+        self.project_tools=ProjectTools(self)
+
+    def closeEvent(self,event):
+        if hasattr(self,'project_tools') and not self.project_tools.loading and not self.project_tools.confirm_replace():
+            event.ignore();return
+        event.accept()
 
     def initUI(self):
         #sets the window title
-        self.setWindowTitle('SmartMagMapper')
+        self.setWindowTitle('SmartMagMapper | Project workspace')
         #set function to 'bold' labels
         bold = QFont()
         bold.setBold(True)
@@ -165,7 +181,7 @@ class MainWindow(QMainWindow):
         self.set_continuation_height.setAlignment(Qt.AlignmentFlag.AlignRight)
 
         self.select_file = QComboBox()
-        self.select_file.setPlaceholderText('Select File to Display')
+        self.select_file.setPlaceholderText('Import a survey to begin')
         self.select_file.currentIndexChanged.connect(self.select_display_file)
         #self.select_file.setAlignment(Qt.AlignmentFlag.AlignRight)
 
@@ -231,7 +247,16 @@ class MainWindow(QMainWindow):
         button_layout_2.addWidget(self.map_view_type)
         button_layout_2.addWidget(self.field_label)
         button_layout_2.addWidget(self.residual_method)
-        button_layout_2.addWidget(self.select_file)
+        self.shared_survey_widget = QWidget()
+        shared_layout = QHBoxLayout(self.shared_survey_widget)
+        shared_layout.setContentsMargins(8, 4, 8, 4)
+        shared_layout.addWidget(QLabel('Active survey:'))
+        shared_layout.addWidget(self.select_file, 1)
+        self.shared_field_label = QLabel('Map field: no survey')
+        self.shared_field_label.setWordWrap(True)
+        self.shared_field_label.setMaximumWidth(620)
+        shared_layout.addWidget(self.shared_field_label)
+        main_layout.addWidget(self.shared_survey_widget)
         global_controls_layout.addLayout(button_layout_2)
         self.global_controls_widget.setLayout(global_controls_layout)
         main_layout.addWidget(self.global_controls_widget)
@@ -247,35 +272,43 @@ class MainWindow(QMainWindow):
 
         central_widget = QWidget()
         central_widget.setLayout(main_layout)
-        self.tabs.addTab(self.data, 'Data Table')
+        # Table is hosted in the data workspace.
         map_widget = QWidget()
+        self.original_map_widget = map_widget  # Keep the export canvas alive outside the main tabs.
         map_widget.setLayout(self.map_layout)
-        self.tabs.addTab(map_widget,'Map')
+        # Original map retained for exports and legacy plot actions.
         #table_widget = QWidget()
         #table_widget.setLayout(table_layout)
         self.plot_tabs = QTabWidget()
+        self.plot_tabs.setTabsClosable(True)
+        self.plot_tabs.tabCloseRequested.connect(self.close_signal_plot)
         self.plot_widget = QWidget()
         #creating the plot layout
         self.plot_layout = QVBoxLayout()
         self.plot_layout.addWidget(self.plot_tabs)
         #plot_layout.addWidget(self.chart)
         self.plot_widget.setLayout(self.plot_layout)
-        self.tabs.addTab(self.plot_widget, 'Time-Series Data')
+        self.data_workspace = DataWorkspace(self)
+        self.tabs.addTab(self.data_workspace, 'Data && Cleaning')
+        self.filters_workspace = FilterWorkspace(self.active_session, self.commit_filter_result, self.reset_map, self)
+        self.tabs.addTab(self.filters_workspace, 'Filter Lab')
         self.orphan_well_widget = self.create_orphan_well_tab()
-        self.tabs.addTab(self.orphan_well_widget, 'OrphaMag')
+        self.tabs.addTab(self.orphan_well_widget, 'Anomaly Analysis')
+        self.tabs.addTab(self.create_location_tab(), 'Location Estimate')
+        self.data_workspace.bind_controls()
         self.tabs.currentChanged.connect(self.update_global_controls_visibility)
         main_layout.addWidget(self.tabs)
         self.setCentralWidget(central_widget)
         #self.setCentralWidget(central_widget)
         self.setMinimumSize(1200, 760)
-        self.resize(1500, 900)
+        self.resize(1500, 940)
+        self.apply_scientific_style()
+        self.global_controls_widget.hide()
 
-    def update_global_controls_visibility(self, index):
-        if hasattr(self, 'global_controls_widget'):
-            self.global_controls_widget.setVisible(self.tabs.tabText(index) != 'OrphaMag')
-        # Update orphan well dataset selector when switching to OrphaMag tab
-        if index == 1 and self.tabs.tabText(index) == 'OrphaMag':
-            self._populate_ow_dataset_selector()
+    def update_global_controls_visibility(self,index):
+        # Each workspace owns its controls. The active-survey header is always visible.
+        self.global_controls_widget.hide()
+        self.shared_survey_widget.show()
 
 
     def create_orphan_well_tab(self):
@@ -363,16 +396,18 @@ class MainWindow(QMainWindow):
         controls = QGroupBox('Workflow and parameters')
         controls_layout = QVBoxLayout()
 
-        # Dataset selection dropdown
-        dataset_layout = QHBoxLayout()
-        dataset_label = QLabel('Select Dataset:')
-        self.ow_dataset_selector = QComboBox()
-        self.ow_dataset_selector.setPlaceholderText('Choose imported dataset...')
-        self.ow_dataset_selector.currentIndexChanged.connect(self._update_ow_dataset)
-        dataset_layout.addWidget(dataset_label)
-        dataset_layout.addWidget(self.ow_dataset_selector)
-        dataset_layout.addStretch()
-        controls_layout.addLayout(dataset_layout)
+        self.ow_dataset_label = QLabel('Active survey: none')
+        self.ow_dataset_label.setWordWrap(True)
+        controls_layout.addWidget(self.ow_dataset_label)
+        self.ow_input = QComboBox()
+        self.ow_input.addItems(['Cleaned total field', 'Current filter result'])
+        self.ow_input.setToolTip('Use the shared cleaned baseline, or explicitly analyze the field currently shown on the map.')
+        self.ow_input.currentIndexChanged.connect(self.process_orphan_well_dataset)
+        controls_layout.addWidget(QLabel('Analyze:'))
+        controls_layout.addWidget(self.ow_input)
+        self.ow_input_label = QLabel('Analysis input: no survey')
+        self.ow_input_label.setWordWrap(True)
+        controls_layout.addWidget(self.ow_input_label)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -418,17 +453,21 @@ class MainWindow(QMainWindow):
 
         #optional known well location, left blank when the well location is unknown
         self.ow_well_lat = QLineEdit()
-        self.ow_well_lat.setPlaceholderText('Optional, e.g. 42.142823')
+        self.ow_well_lat.setPlaceholderText('Optional latitude in degrees')
         self.ow_well_lon = QLineEdit()
-        self.ow_well_lon.setPlaceholderText('Optional, e.g. -75.824952')
+        self.ow_well_lon.setPlaceholderText('Optional longitude in degrees')
         for well_field in (self.ow_well_lat, self.ow_well_lon):
             well_field.setAlignment(Qt.AlignmentFlag.AlignRight)
             well_field.setClearButtonEnabled(True)
 
         form.addRow('Known well latitude', self.ow_well_lat)
         form.addRow('Known well longitude', self.ow_well_lon)
-        form.addRow('Startup samples removed', self.ow_startup_samples)
-        form.addRow('Spatial MAD filter', self.ow_spatial_mad)
+        # Cleaning controls live in Data & cleaning.
+        self.ow_fallback_percentile = QDoubleSpinBox()
+        self.ow_fallback_percentile.setRange(50,100)
+        self.ow_fallback_percentile.setValue(95)
+        self.ow_fallback_percentile.setSuffix(' %')
+        self.ow_fallback_percentile.valueChanged.connect(self.schedule_orphan_reload)
         form.addRow('Score window length (m)', self.ow_window_length)
         form.addRow('Window step ratio', self.ow_step_ratio)
         form.addRow('Threshold gamma', self.ow_gamma)
@@ -440,6 +479,7 @@ class MainWindow(QMainWindow):
         self.ow_apply_button.clicked.connect(self.run_orphan_analysis)
         self.ow_export_button = QPushButton('Export Results')
         self.ow_export_button.clicked.connect(self.export_orphan_results)
+        self.ow_export_button.setEnabled(False)
         for button in [
             self.ow_apply_button,
             self.ow_export_button,
@@ -453,24 +493,24 @@ class MainWindow(QMainWindow):
 
         self.ow_summary = QTextEdit()
         self.ow_summary.setReadOnly(True)
-        self.ow_summary.setMinimumHeight(280)
-        self.ow_summary.setMaximumHeight(420)
-        self.ow_summary.setText('Use the top Import Data button while this tab is active to run the orphan-well workflow.')
+        self.ow_summary.setMinimumHeight(180)
+        self.ow_summary.setMaximumHeight(340)
+        self.ow_summary.setText('Import a survey using File > Import Data. Inspect the result map, then follow the numbered stages for supporting evidence.')
 
         controls_panel = QWidget()
         controls_panel_layout = QVBoxLayout(controls_panel)
         controls_panel_layout.setContentsMargins(0, 0, 0, 0)
         controls_panel_layout.setSpacing(10)
         controls_panel_layout.addWidget(controls)
-        controls_panel_layout.addWidget(QLabel('Result summary'))
+        # Detailed location summary lives in the final workspace.
         controls_panel_layout.addWidget(self.ow_summary)
         controls_panel_layout.addStretch()
 
         controls_scroll = QScrollArea()
         controls_scroll.setWidgetResizable(True)
         controls_scroll.setWidget(controls_panel)
-        controls_scroll.setMinimumWidth(360)
-        controls_scroll.setMaximumWidth(450)
+        controls_scroll.setMinimumWidth(310)
+        controls_scroll.setMaximumWidth(380)
 
         self.ow_visual_tabs = QTabWidget()
         self.ow_visual_tabs.setDocumentMode(True)
@@ -487,19 +527,20 @@ class MainWindow(QMainWindow):
 
         self.ow_cluster_figure = Figure(figsize=(8.5, 6.2), constrained_layout=True)
         self.ow_cluster_canvas = FigureCanvas(self.ow_cluster_figure)
-        self.ow_cluster_canvas.setMinimumHeight(560)
+        self.ow_cluster_canvas.setMinimumHeight(300)
 
         self.ow_score_figure = Figure(figsize=(8.5, 4.8), constrained_layout=True)
         self.ow_score_canvas = FigureCanvas(self.ow_score_figure)
-        self.ow_score_canvas.setMinimumHeight(500)
+        self.ow_score_canvas.setMinimumHeight(280)
 
         self.ow_field_figure = Figure(figsize=(8.5, 4.8), constrained_layout=True)
         self.ow_field_canvas = FigureCanvas(self.ow_field_figure)
-        self.ow_field_canvas.setMinimumHeight(500)
+        self.ow_field_canvas.setMinimumHeight(280)
 
+        self.ow_vmd_panel = VMDPanel(editable=False)
         self.ow_modes_figure = Figure(figsize=(8.5, 4.8), constrained_layout=True)
         self.ow_modes_canvas = FigureCanvas(self.ow_modes_figure)
-        self.ow_modes_canvas.setMinimumHeight(500)
+        self.ow_modes_canvas.setMinimumHeight(280)
 
         self.ow_geoxai_text = QTextEdit()
         self.ow_geoxai_text.setReadOnly(True)
@@ -507,7 +548,7 @@ class MainWindow(QMainWindow):
         self.ow_geoxai_text.setText('Import a survey to generate a GeoXAI candidate explanation.')
         self.ow_geoxai_figure = Figure(figsize=(8.5, 4.8), constrained_layout=True)
         self.ow_geoxai_canvas = FigureCanvas(self.ow_geoxai_figure)
-        self.ow_geoxai_canvas.setMinimumHeight(420)
+        self.ow_geoxai_canvas.setMinimumHeight(280)
 
         self.ow_figure = self.ow_cluster_figure
         self.ow_canvas = self.ow_cluster_canvas
@@ -526,12 +567,15 @@ class MainWindow(QMainWindow):
         geoxai_layout.addWidget(self.ow_geoxai_text)
         geoxai_layout.addWidget(self.ow_geoxai_canvas)
 
-        self.ow_visual_tabs.addTab(self.ow_web_map, 'Map')
-        self.ow_visual_tabs.addTab(plot_page(self.ow_cluster_canvas), 'Engineering Map')
-        self.ow_visual_tabs.addTab(plot_page(self.ow_field_canvas), 'Total Field')
-        self.ow_visual_tabs.addTab(plot_page(self.ow_modes_canvas), 'VMD Modes')
-        self.ow_visual_tabs.addTab(plot_page(self.ow_score_canvas), 'Scores')
-        self.ow_visual_tabs.addTab(geoxai_page, 'GeoXAI')
+        self.ow_visual_tabs.addTab(self.ow_web_map, 'Web Map')
+        self.ow_visual_tabs.addTab(plot_page(self.ow_cluster_canvas), 'Location Map')
+        self.ow_visual_tabs.addTab(plot_page(self.ow_field_canvas), 'Magnetic Field')
+        self.ow_visual_tabs.addTab(self.ow_vmd_panel, 'VMD Modes')
+        self.ow_visual_tabs.addTab(plot_page(self.ow_score_canvas), 'Anomaly Scores')
+        self.ow_visual_tabs.addTab(geoxai_page, 'Explainable AI (XAI)')
+        for source,target in [(2,0),(3,1),(4,2),(4,3),(5,4)]:
+            self.ow_visual_tabs.tabBar().moveTab(source,target)
+        self.ow_visual_tabs.setCurrentIndex(0)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(controls_scroll)
@@ -539,6 +583,23 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([390, 1040])
+        self.result_headline = QLabel('Import data to begin anomaly exploration.')
+        self.result_headline.setObjectName('analysisMetrics')
+        self.result_headline.setWordWrap(True)
+        controls_layout.addWidget(self.result_headline)
+        navigation = QHBoxLayout()
+        self.previous_stage = QPushButton('Previous view')
+        self.next_stage = QPushButton('Next stage')
+        self.stage_label = QLabel();self.stage_label.hide()
+        settings_toggle=QPushButton('Analysis settings');settings_toggle.setCheckable(True);settings_toggle.setChecked(True);settings_toggle.toggled.connect(controls_scroll.setVisible)
+        navigation.addWidget(settings_toggle)
+        navigation.addWidget(self.previous_stage); navigation.addWidget(self.stage_label,1); navigation.addWidget(self.next_stage)
+        root_layout.addLayout(navigation)
+        self.stage_order = list(range(6))
+        self.previous_stage.clicked.connect(lambda: self.move_analysis_stage(-1))
+        self.next_stage.clicked.connect(lambda: self.move_analysis_stage(1))
+        self.ow_visual_tabs.currentChanged.connect(self.update_stage_navigation)
+        self.update_stage_navigation()
         root_layout.addWidget(splitter)
 
         clean_widgets = [self.ow_startup_samples, self.ow_spatial_mad]
@@ -566,78 +627,213 @@ class MainWindow(QMainWindow):
         return widget
 
 
+    def create_location_tab(self):
+        page=QWidget();layout=QVBoxLayout(page)
+        # The selected workspace tab supplies its heading.
+        self.location_headline=QLabel('Inspect the anomaly evidence first. Location estimates appear here after analysis.')
+        self.location_headline.setWordWrap(True);self.location_headline.hide()
+        self.location_views=QTabWidget()
+        # Move candidate-location views to the final workspace; preserve canvas objects.
+        for name in ['Location Map','Web Map']:
+            index=next(i for i in range(self.ow_visual_tabs.count()) if self.ow_visual_tabs.tabText(i)==name)
+            widget=self.ow_visual_tabs.widget(index);self.ow_visual_tabs.removeTab(index)
+            self.location_views.addTab(widget,name)
+        splitter=QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self.location_views)
+        self.ow_summary.setParent(None);self.ow_summary.setMaximumHeight(16777215)
+        self.ow_summary.setMinimumWidth(260);splitter.addWidget(self.ow_summary)
+        splitter.setSizes([1000,320]);layout.addWidget(splitter,1)
+        footer=QHBoxLayout();back=QPushButton('Review anomaly evidence');back.clicked.connect(lambda:self.tabs.setCurrentWidget(self.orphan_well_widget))
+        export=QPushButton('Export location results');export.clicked.connect(self.export_orphan_results)
+        footer.addWidget(back);footer.addStretch();footer.addWidget(export);layout.addLayout(footer)
+        self.stage_order=list(range(self.ow_visual_tabs.count()))
+        self.ow_visual_tabs.setCurrentIndex(0);self.update_stage_navigation()
+        return page
+
+    def move_analysis_stage(self, delta):
+        position=self.ow_visual_tabs.currentIndex()+delta
+        if position>=self.ow_visual_tabs.count():
+            self.tabs.setCurrentIndex(self.tabs.count()-1)
+        else:self.ow_visual_tabs.setCurrentIndex(max(0,position))
+
+    def update_stage_navigation(self, *_):
+        position=self.ow_visual_tabs.currentIndex()
+        self.stage_label.clear();self.stage_label.hide()
+        self.previous_stage.setEnabled(position>0)
+        self.next_stage.setEnabled(True)
+        self.next_stage.setText('View location estimate' if position==self.ow_visual_tabs.count()-1 else 'Next view')
+
     def create_toolbar(self):
-        #creates the toolbar
-        self.toolbar = QToolBar('Main Toolbar')
-        #sets the toolbar to the main window
-        self.addToolBar(self.toolbar)
-        #creates action for opening files
-        open_action = QAction('Import Data', self)
-        open_action.setStatusTip('Import Excel Data')
-        open_action.triggered.connect(self.import_data_action)
-        self.toolbar.addAction(open_action)
-
-        #export cleaned dataset
-        export_data = QAction('Export Data', self)
-        export_data.triggered.connect(self.export_dialog)
-        self.toolbar.addAction(export_data)
-
-        #filter_actions
-        filter_action = QAction('Upward Continuation', self)
-        #filter_action.setStatusTip('Filter Applied to Data')
-        filter_action.triggered.connect(self.upward_continuation)
-        #self.toolbar.addAction(filter_action)
-
-        filter2_action = QAction('Downward Continuation', self)
-        filter2_action.triggered.connect(self.downward_continuation)
-        #toolbar.addAction(filter2_action)
-
-        rtp_action = QAction('Reduction to Pole', self)
-        rtp_action.triggered.connect(self.reduction_to_pole)
-
-        vmd_action = QAction('Variational Mode Decomposition', self)
-        vmd_action.triggered.connect(self.variational_mode_decomposition)
-
-        #reset_canvas_actions
-        reset_canvas_action = QAction('Clear Figure', self)
-        #filter_action.setStatusTip('Filter Applied to Data')
-        reset_canvas_action.triggered.connect(self.clear_data)
-        #self.toolbar.addAction(reset_canvas_action)
-
-        #reset map action
-        reset_map = QAction('Reset Map', self)
-        reset_map.triggered.connect(self.reset_map)
-        self.toolbar.addAction(reset_map)
-
-        #set v values action
-        set_value_action = QAction('Change Map Scale', self)
-        set_value_action.triggered.connect(self.scale_changed)
-        self.toolbar.addAction(set_value_action)
-
-        #change the data visualized in the plot
-        plot_data = QAction('Change Plot', self)
-        plot_data.triggered.connect(self.plot_changed)
-        #self.toolbar.addAction(plot_data)
-
-        self.menu = self.menuBar()
-        self.file_menu = self.menu.addMenu('&File')
-        self.file_menu.addAction(open_action)
-        self.file_menu.addAction(reset_map)
-        self.file_menu.addAction(export_data)
-
-        self.edit_menu = self.menu.addMenu('&Plot')
-
-        self.filters_menu = self.menu.addMenu('&Apply Filters')
-        self.filters_menu.addAction(filter_action)
-        self.filters_menu.addAction(filter2_action)
-        self.filters_menu.addAction(rtp_action)
-        self.filters_menu.addAction(vmd_action)
-        self.toolbar.addAction(self.filters_menu.menuAction())
+        self.toolbar = QToolBar('Survey'); self.toolbar.setMovable(False); self.addToolBar(self.toolbar)
+        import_action=QAction('Import Data',self);import_action.triggered.connect(self.import_data_action)
+        import_action.setShortcut('Ctrl+Shift+I')
+        export_action=QAction('Export Data',self);export_action.triggered.connect(self.export_dialog)
+        self.toolbar.hide()
+        self.menu=self.menuBar();self.file_menu=self.menu.addMenu('File')
+        self.file_menu.addAction(import_action);self.file_menu.addAction(export_action)
+        self.file_menu.addSeparator()
+        filter_export=QAction('Export filter comparison / modes',self)
+        filter_export.triggered.connect(lambda: self.filters_workspace.export())
+        self.file_menu.addAction(filter_export)
+        anomaly_export=QAction('Export anomaly results',self)
+        anomaly_export.triggered.connect(self.export_orphan_results)
+        self.file_menu.addAction(anomaly_export)
+        # Signal-column selection belongs inside Signal Plots.
 
         #export_actions
 
     #def create_menu(self):
         #add menu with actions from toolbar
+
+    def commit_filter_result(self,frame,settings):
+        if settings['field'] != 'Current result':
+            self.active_filters = []
+        filters=self.active_filters + [settings['method']]
+        self.filtered_scale_changed(frame,filters=filters,parameters=settings,replace_history=settings['field']!='Current result',
+            status_message='Filter result stored. Original map preserved; Anomaly Explorer analysis input is explicit.')
+
+    def apply_scientific_style(self):
+        self.setStyleSheet("""
+            QMainWindow, QWidget { font-family: 'Segoe UI'; font-size: 10pt; color: #172b4d; background: #f4f7fb; }
+            QToolBar { background: #15324f; padding: 8px; spacing: 14px; border: 0; }
+            QToolButton { color: white; background: #15324f; padding: 7px 12px; }
+            QToolButton:hover { background: #245273; }
+            QMenuBar { background: #e7edf4; }
+            QMenu { background: white; }
+            QMenu::item { padding: 8px 48px 8px 16px; }
+            QMenu::item:selected { background: #d3e3ef; }
+            QMenu::item:disabled { color: #718096; }
+            QTabWidget::pane { border: 1px solid #d7e0ea; background: white; }
+            QTabBar::tab { background: #e7edf4; color: #334b63; padding: 11px 17px; border: 0; margin-right: 3px; }
+            QTabBar::tab:selected { background: #cbddeb; font-weight: 600; color: #006d77; border-bottom: 3px solid #008d91; }
+            QGroupBox { background: white; border: 1px solid #d7e0ea; border-radius: 6px; margin-top: 14px; padding: 12px 8px 8px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; color: #15324f; }
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit { background: white; color: #172b4d; border: 1px solid #c8d5e2; border-radius: 4px; padding: 5px; }
+            QComboBox QAbstractItemView { background: white; color: #172b4d; selection-background-color: #d4efed; }
+            QPushButton { background: #e8f1f6; border: 1px solid #bfd1df; border-radius: 4px; padding: 9px; color: #15324f; }
+            QPushButton:pressed, QPushButton:checked { background:#b5ccdf; border:1px solid #54799a; color:#102b46; }
+            QPushButton#primaryButton:pressed { background:#005d63; }
+            QPushButton:checked:hover { background:#a4bfd6; border:1px solid #54799a; }
+            QPushButton:hover { background: #d7e9ed; }
+            QPushButton:disabled { background: #edf0f4; color: #8896a5; }
+            QPushButton#primaryButton { background: #007f86; color: white; }
+            QLabel#sectionTitle { font-size: 18pt; font-weight: 700; color: #15324f; padding: 4px; }
+            QTableView, QTableWidget { background: white; alternate-background-color: #f1f6fa; gridline-color: #dce4ec; }
+            QHeaderView::section { background: #e7edf4; padding: 7px; border: 0; color: #15324f; }
+            QStatusBar { background: #e7edf4; }
+            QScrollArea { border: 0; }
+            QAbstractSpinBox { padding-right: 22px; }
+            QAbstractSpinBox:disabled { color: #8793a3; background: #eef1f5; }
+            QAbstractSpinBox::up-button, QAbstractSpinBox::down-button { width: 19px; }
+        """)
+        # Replace the earlier dark per-page rules with the application-wide scientific theme.
+        self.orphan_well_widget.setStyleSheet('')
+        self.data.setAlternatingRowColors(True)
+
+    def active_session(self):
+        index = getattr(self, 'active_dataset_index', None)
+        if index is None or not 0 <= index < len(getattr(self, 'sessions', [])):
+            return None
+        return self.sessions[index]
+
+    def register_survey(self, path, mag, gps):
+        candidate = SurveySession(path, mag, gps)
+        candidate.ensure_cleaned(self.orphan_params())
+        index = next((i for i, item in enumerate(self.sessions)
+                      if os.path.normcase(item.path) == os.path.normcase(candidate.path)), None)
+        self.select_file.blockSignals(True)
+        try:
+            if index is None:
+                index = len(self.sessions)
+                self.sessions.append(candidate)
+                self.df_list.append(None)
+                label = Path(candidate.path).name
+                if self.select_file.findText(label) >= 0:
+                    label += f' ({Path(candidate.path).parent.name})'
+                self.select_file.addItem(label, candidate.path)
+            else:
+                self.sessions[index] = candidate
+            self.select_file.setCurrentIndex(index)
+        finally:
+            self.select_file.blockSignals(False)
+        self.activate_survey(index)
+        if hasattr(self,'project_tools'):self.project_tools.changed()
+        return index
+
+    def activate_survey(self, index):
+        if index is None or not 0 <= index < len(self.sessions):
+            return
+        self.ow_update_timer.stop()
+        self.ow_reload_timer.stop()
+        self.clear_orphan_results('Loading shared survey...')
+        session = self.sessions[index]
+        if hasattr(self,'project_tools') and self.active_dataset_index!=index:self.project_tools.select_survey_cleaning(session)
+        session.ensure_cleaned(self.orphan_params())
+        self.active_dataset_index = index
+        self.ow_selected_dataset_index = index
+        self.ow_selected_dataset = session.cleaned
+        self.ow_file_path = session.path
+        self.file_paths = [session.path]
+        self.short_name = Path(session.path).name
+        self.active_filters = list(session.filters)
+        self.processed_dfs[index] = session.cleaned.copy(deep=True)
+        self.mag_gps_dfs[index] = (session.magnetometer, session.location)
+        self.residual_cache = None
+        self.map_vmin = self.map_vmax = self.vmin = self.vmax = None
+        self.set_vmin.clear()
+        self.set_vmax.clear()
+        self.display_processed_df(session.working)
+        self.update_field_labels()
+        self.filters_workspace.session_changed()
+        self.data_workspace.refresh()
+        self.run_orphan_analysis()
+
+    def current_map_field_name(self):
+        session=self.active_session()
+        if session is None or not session.filter_history:
+            return 'Cleaned total field'
+        history=session.filter_history
+        signal=history[0]['parameters'].get('field','Total magnitude')
+        parts=[signal]
+        for step in history:
+            settings=step['parameters'];name=step['filter']
+            if name=='VMD' and settings.get('selected_modes'):
+                name+=' (modes '+', '.join(map(str,settings['selected_modes']))+')'
+            elif 'continuation' in name.lower() and 'height' in settings:
+                name+=f" ({settings['height']:g} m)"
+            parts.append(name)
+        mode=self.residual_mode()
+        if mode: parts.append(RESIDUAL_LABELS[mode])
+        return ' ? '.join(parts)
+
+    def update_field_labels(self):
+        session = self.active_session()
+        if session:
+            self.ow_dataset_label.setText(f'Active survey: {Path(session.path).name} | {len(session.cleaned)} shared samples')
+            self.shared_field_label.setText(f'Current filter result: {self.current_map_field_name()}')
+
+    def clear_orphan_results(self, message):
+        self.ow_clean_df = self.ow_annotated_df = None
+        if hasattr(self,'result_headline'): self.result_headline.setText(message)
+        if hasattr(self,'location_headline'): self.location_headline.setText(message)
+        self.ow_score_points = self.ow_clusters = None
+        self.ow_summary_data = {}
+        self.ow_modes = self.ow_mode_metrics = None
+        self.ow_selected_modes = []
+        self.ow_export_button.setEnabled(False)
+        self.ow_summary.setPlainText(message)
+        self.ow_input_label.setText('Analysis input: pending')
+        if hasattr(self, 'ow_vmd_panel'): self.ow_vmd_panel.clear(message)
+        for name in ('ow_field', 'ow_score', 'ow_cluster', 'ow_modes', 'ow_geoxai'):
+            figure = getattr(self, name + '_figure', None)
+            canvas = getattr(self, name + '_canvas', None)
+            if figure is not None:
+                figure.clear()
+            if canvas is not None:
+                canvas.draw_idle()
+        self.ow_geoxai_report=None
+        self.ow_geoxai_text.setPlainText(message)
+        self.ow_web_map.setHtml('<html><body>' + 'Candidate results pending' + '</body></html>')
 
     def import_data_action(self):
         self.file_editor_window()
@@ -661,151 +857,32 @@ class MainWindow(QMainWindow):
 #        self.read_from_dialog()
 
     def read_from_dialog(self):
-    #will probably have to change this when adding the ability to manually choose columns
-        try:
-            self.file_paths = self.dlg.file_paths
-            raw_file = self.dlg.raw_file
-            if raw_file is not None and self.file_paths:
-                # the dialog only reads the first selected file
-                file_index = self.store_dataset(self.file_paths[0], raw_file)
-                for index, value in enumerate(self.df_list):
-                    print(f"Index: {index}, Value: {value}")
-                self.read_file(file_index)
-                # Update orphan well dataset selector and switch it to the imported file
-                self._populate_ow_dataset_selector(select_index=file_index)
-                print('Yeahh!')
-        except Exception as e:
-            print(f':( {e}')
-            import traceback
-            traceback.print_exc()
+        dlg = self.dlg
+        mag, gps = dlg.build_streams()
+        return self.register_survey(dlg.file_paths[0], mag, gps)
 
     def store_dataset(self, file_path, raw_file):
-        """Add an imported file to df_list and the file selector at the same index.
-        Re-importing the same file replaces its entry instead of adding a duplicate."""
-        file_path = str(file_path)
-        file_index = self.select_file.findData(file_path)
-        if file_index != -1:
-            self.df_list[file_index] = raw_file
-            # drop cached results so the file is reprocessed with the new dialog settings
-            for cache in (self.processed_dfs, self.dialog_configs, self.mag_gps_dfs):
-                cache.pop(file_index, None)
-            return file_index
-
-        # df_list must be updated before addItem, which can trigger select_display_file
-        self.df_list.append(raw_file)
-        label = os.path.basename(file_path)
-        if self.select_file.findText(label) != -1:
-            # different file with the same name, so show its folder too
-            label = f'{label} ({os.path.basename(os.path.dirname(file_path))})'
-        self.select_file.addItem(label, userData=file_path)
-        return len(self.df_list) - 1
+        raise RuntimeError('Use register_survey so both workspaces share validated survey streams.')
 
     def _populate_ow_dataset_selector(self, select_index=None):
-        """Update the orphan well dataset dropdown with current imported datasets.
-        Keeps the user's selection unless a dataset was imported, and only
-        reruns the pipeline when the selected dataset actually changes.
-        Passing select_index selects that dataset and always reruns the pipeline."""
-        previous_index = self.ow_dataset_selector.currentIndex()
-        previous_count = self.ow_dataset_selector.count()
-
-        self.ow_dataset_selector.blockSignals(True)
-        self.ow_dataset_selector.clear()
-
-        for index, df in enumerate(self.df_list):
-            # Use file name from select_file combobox if available, else use index
-            if index < self.select_file.count():
-                label = self.select_file.itemText(index)
-            else:
-                label = f'Dataset {index}'
-            self.ow_dataset_selector.addItem(label, index)
-
-        count = self.ow_dataset_selector.count()
-        if count == 0:
-            self.ow_dataset_selector.blockSignals(False)
-            return
-        # Jump to the requested or newest dataset after an import, otherwise keep the current selection
-        if select_index is not None and 0 <= select_index < count:
-            target_index = select_index
-        elif count > previous_count or not 0 <= previous_index < count:
-            target_index = count - 1
-        else:
-            target_index = previous_index
-        self.ow_dataset_selector.setCurrentIndex(target_index)
-        self.ow_dataset_selector.blockSignals(False)
-
-        if select_index is not None or target_index != self.ow_selected_dataset_index:
-            self._update_ow_dataset(target_index)
+        # Compatibility hook: the only dataset selector is now the global one.
+        if select_index is not None:
+            self.select_file.setCurrentIndex(select_index)
 
     def _update_ow_dataset(self, index):
-        """Handle orphan well dataset selection change and automatically process."""
-        if index < 0 or index >= len(self.df_list):
-            return
-        # Store the selected dataset for use in the pipeline
-        self.ow_selected_dataset = self.df_list[index]
-        self.ow_selected_dataset_index = index
-        self.statusBar().showMessage(f'Selected dataset: {self.ow_dataset_selector.itemText(index)}')
-
-        # Automatically trigger the orphan well pipeline
-        self.process_orphan_well_dataset()
+        self.select_file.setCurrentIndex(index)
 
     def _dialog_finish_handler(self):
-        """Validate dialog dropdowns before finishing. If any required field is empty,
-        show the dialog's missing_variable_warning. Otherwise assign variables,
-        read from dialog and accept the dialog."""
-        dlg = self.dlg
-        # Determine required fields based on mag type
-        if dlg.VectorMag.isChecked():
-            mag_widgets = [dlg.XMagField, dlg.YMagField, dlg.ZMagField]
-        else:
-            mag_widgets = [dlg.TotalMagField]
-
-        # Determine required fields based on time type
-        if dlg.SingleTime.isChecked():
-            time_widgets = [dlg.TotalTime]
-        else:
-            time_widgets = [dlg.MagTime, dlg.LocTime]
-
-        coord_widgets = [dlg.XLatitude, dlg.YLongitude]
-        required_widgets = mag_widgets + time_widgets + coord_widgets
-
-        self.missing = []
-        for w in required_widgets:
-            try:
-                text = w.currentText()
-            except Exception:
-                try:
-                    text = w.text()
-                except Exception:
-                    text = ''
-            if not text:
-                self.missing.append(w)
-
-        if self.missing:
-            try:
-                self.dlg.missing_variable_warning()
-            except Exception:
-                self.statusBar().showMessage('Missing variables in dialog. Please fill all required fields.')
-            return
-
-        # all good: assign variables, process and close dialog
-        try:
-            dlg.assign_variables()
-        except Exception:
-            pass
         try:
             self.read_from_dialog()
-        except Exception:
-            pass
-        try:
-            dlg.accept()
-        except Exception:
-            pass
+        except Exception as exc:
+            QMessageBox.warning(self.dlg, 'Survey import', str(exc))
+            return
+        self.dlg.accept()
 
     def read_file(self, file_index):
-        self.active_dataset_index = file_index
-        self.short_name = self.select_file.itemText(file_index)
-        self.select_file.setPlaceholderText(self.short_name)
-        self.excel_reader(df=self.df_list[file_index], cache_index=file_index)
+        self.select_file.setCurrentIndex(file_index)
+        self.activate_survey(file_index)
     #make excel reader optional? for people who don't want their data cleaned or already did it
 
     def reference_well_coordinates(self, report=False):
@@ -851,6 +928,7 @@ class MainWindow(QMainWindow):
             well_lon=well[1] if well else None,
             startup_samples=int(self.ow_startup_samples.value()),
             spatial_mad_multiplier=float(self.ow_spatial_mad.value()),
+            spatial_fallback_percentile=float(self.ow_fallback_percentile.value()),
             window_length_m=float(self.ow_window_length.value()),
             step_ratio=float(self.ow_step_ratio.value()),
             gamma=float(self.ow_gamma.value()),
@@ -859,14 +937,12 @@ class MainWindow(QMainWindow):
         )
 
     def schedule_orphan_analysis(self):
-        if self.ow_clean_df is None or self.ow_modes is None:
-            return
-        self.ow_update_timer.start(350)
+        if self.active_session() is not None:
+            self.ow_update_timer.start(350)
 
     def schedule_orphan_reload(self):
-        if self.ow_selected_dataset is None and self.ow_file_path is None:
-            return
-        self.ow_reload_timer.start(650)
+        if self.active_session() is not None:
+            self.ow_reload_timer.start(650)
 
     def import_orphan_well_survey(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -879,126 +955,82 @@ class MainWindow(QMainWindow):
             self.load_orphan_well_file(file_path)
 
     def load_butkowsky_test_survey(self):
-        test_path = (
-            Path(__file__).resolve().parents[1]
-            / 'Orphan Well Data'
-            / 'Butkowsky 1A Surveys 10_09_25'
-            / 'McKee_Seth.xls'
-        )
-        if not test_path.exists():
-            test_path = Path(
-                r'C:\Users\nimri\OneDrive\Desktop\Retreived OW\Orphan Well Data\Butkowsky 1A Surveys 10_09_25\McKee_Seth.xls'
-            )
-        if not test_path.exists():
-            QMessageBox.warning(self, 'Missing test survey', f'Could not find test survey:\n{test_path}')
-            return
-        self.load_orphan_well_file(str(test_path))
+        self.import_orphan_well_survey()
 
     def reload_orphan_well_file(self):
-        # Datasets from the main import are re-cleaned from the cached mag/gps data
-        if self.ow_selected_dataset is not None:
-            self.process_orphan_well_dataset()
-            return
-        if self.ow_file_path is None:
-            self.statusBar().showMessage('No orphan-well survey loaded.')
-            return
-        self.load_orphan_well_file(self.ow_file_path)
+        if self.active_session() is not None:
+            try:
+                self.activate_survey(self.active_dataset_index)
+            except Exception as exc:
+                self.data_workspace.status.show()
+                self.data_workspace.status.setText(f'Cleaning settings could not be applied: {exc}. Displayed data retain the last successful settings.')
+                self.filters_workspace.invalidate()
+                self.clear_orphan_results(f'Cleaning settings could not be applied: {exc}')
+                self.statusBar().showMessage('Adjust cleaning settings to retain enough valid samples.')
 
-    def process_orphan_well_dataset(self):
-        """Process the selected dataset from the dropdown through the orphan well pipeline."""
-        if not hasattr(self, 'ow_selected_dataset') or self.ow_selected_dataset is None:
-            self.statusBar().showMessage('Please select a dataset from the dropdown first.')
-            return
-
-        dataset_index = self.ow_selected_dataset_index
-        if dataset_index not in self.mag_gps_dfs:
-            self.statusBar().showMessage('Dataset not yet processed. Please re-import the dataset.')
-            return
-
-        params = self.orphan_params()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            self.statusBar().showMessage('Processing selected dataset through orphan well pipeline...')
-
-            # Use cached magdf and gpsdf from excel_reader for this dataset
-            magdf, gpsdf = self.mag_gps_dfs[dataset_index]
-
-            # Process through pipeline
-            clean_df, audit = ow.clean_survey(magdf, gpsdf, params)
-            modes, mode_metrics, selected_modes = ow.run_vmd_modes(clean_df, params)
-            self.ow_clean_df = clean_df
-            self.ow_audit = audit
-            self.ow_modes = modes
-            self.ow_mode_metrics = mode_metrics
-            self.ow_selected_modes = selected_modes
-            self.run_orphan_analysis()
-            dataset_name = self.ow_dataset_selector.currentText()
-            self.statusBar().showMessage(f'Orphan-well processing complete: {dataset_name}')
-        except Exception as exc:
-            QMessageBox.critical(self, 'Orphan-well processing failed', str(exc))
-            self.statusBar().showMessage('Orphan-well processing failed.')
-        finally:
-            QApplication.restoreOverrideCursor()
+    def process_orphan_well_dataset(self, *_args):
+        self._analysis_mode_key = None
+        self.run_orphan_analysis()
 
     def load_orphan_well_file(self, file_path):
-        self.ow_file_path = str(file_path)
-        self.ow_selected_dataset = None
-        self.ow_selected_dataset_index = None
-        params = self.orphan_params()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        # Startup paths and file-dialog imports enter the same registration path.
         try:
-            self.statusBar().showMessage(f'Processing orphan-well survey: {file_path}')
-            clean_df, audit = ow.load_and_clean(file_path, params)
-            modes, mode_metrics, selected_modes = ow.run_vmd_modes(clean_df, params)
-            self.ow_clean_df = clean_df
-            self.ow_audit = audit
-            self.ow_modes = modes
-            self.ow_mode_metrics = mode_metrics
-            self.ow_selected_modes = selected_modes
-            self.run_orphan_analysis()
-            short_name = os.path.basename(str(file_path))
-            self.tabs.setCurrentWidget(self.orphan_well_widget)
-            self.statusBar().showMessage(f'Orphan-well processing complete: {short_name}')
+            mag, gps = ow.read_survey_file(file_path)
+            self.register_survey(file_path, mag, gps)
         except Exception as exc:
-            QMessageBox.critical(self, 'Orphan-well processing failed', str(exc))
-            self.statusBar().showMessage('Orphan-well processing failed.')
-        finally:
-            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, 'Survey import', str(exc))
+            return False
+        return True
 
     def run_orphan_analysis(self):
-        if self.ow_clean_df is None or self.ow_modes is None:
+        session = self.active_session()
+        if session is None:
             return
+        self.ow_update_timer.stop()
+        self.clear_orphan_results('Updating candidate analysis...')
         params = self.orphan_params()
         try:
-            score_points, clusters, summary = ow.analyze_with_cached_modes(
-                self.ow_clean_df,
-                self.ow_modes,
-                self.ow_selected_modes,
-                params,
-            )
-            annotated = ow.annotate_clean_points(
-                ow.add_well_distance(self.ow_clean_df, params),
-                score_points,
-                clusters,
-            )
-            self.ow_score_points = score_points
-            self.ow_clusters = clusters
-            self.ow_summary_data = summary
-            self.ow_annotated_df = annotated
-            #results stay on the OrphaMag tab so the main map, table and filters keep the imported data
-            self.plot_orphan_results(annotated, score_points, clusters, summary)
+            if self.ow_input.currentIndex() == 1:
+                source = self.map_view(session.working)
+                input_name = self.current_map_field_name()
+            else:
+                source = session.cleaned
+                input_name = 'Cleaned total field'
+            frame = source.copy(deep=True)
+            frame['Analysis_Field_uT'] = frame['BT'].to_numpy(dtype=float)
+            frame['Analysis_Input'] = input_name
+            frame['Source_Survey'] = Path(session.path).name
+            history = session.filter_history if self.ow_input.currentIndex() == 1 else []
+            frame['Analysis_Processing_History'] = json.dumps(history, sort_keys=True)
+            frame['Analysis_Startup_Samples'] = session.cleaning_key[0]
+            frame['Analysis_Spatial_MAD'] = session.cleaning_key[1]
+            frame['Analysis_Spatial_Fallback_Percentile'] = session.cleaning_key[2]
+            modes, metrics, selected = session.modes_for(frame, params)
+            self.ow_clean_df, self.ow_audit = frame, session.audit
+            self.ow_modes, self.ow_mode_metrics, self.ow_selected_modes = modes, metrics, selected
+            points, clusters, summary = ow.analyze_with_cached_modes(frame, modes, selected, params)
+            summary.update(source_survey=Path(session.path).name, analysis_input=input_name,
+                           processing_history=history, dataset_revision=session.revision)
+            annotated = ow.annotate_clean_points(ow.add_well_distance(frame, params), points, clusters)
+            self.ow_score_points, self.ow_clusters = points, clusters
+            self.ow_summary_data, self.ow_annotated_df = summary, annotated
+            self.ow_input_label.setText(f'Analysis input: {input_name}')
+            self.plot_orphan_results(annotated, points, clusters, summary)
             self.ow_summary.setText(self.format_orphan_summary(summary))
-            self.statusBar().showMessage(
-                f"Candidate clusters: {summary.get('n_clusters', 0)} | hits: {summary.get('n_hits', 0)}"
-            )
+            radius=summary.get('candidate_radius_m')
+            spread=f'{radius:.2f} m cluster spread' if radius is not None else 'No selected candidate'
+            self.result_headline.setText(f"{summary.get('n_clusters',0)} candidate clusters\n{summary.get('n_hits',0)} hit windows")
+            self.location_headline.setText(f"{spread}. This is an orphan-well / ferrous-target candidate, requiring field verification. Cluster spread is not a confidence interval.")
+            self.ow_export_button.setEnabled(True)
+            self.statusBar().showMessage(f"{Path(session.path).name}: {len(frame)} shared samples | {summary['n_clusters']} candidate clusters")
         except Exception as exc:
-            QMessageBox.critical(self, 'Orphan-well analysis failed', str(exc))
-            self.statusBar().showMessage('Orphan-well analysis failed.')
+            self.clear_orphan_results(f'Analysis unavailable: {exc}')
+            self.statusBar().showMessage(f'Candidate analysis unavailable: {exc}')
 
     def format_orphan_summary(self, summary):
         if not summary:
             return 'No orphan-well analysis has been run.'
-        lines = []
+        lines = [f"Survey: {summary.get('source_survey', '')}", f"Analysis input: {summary.get('analysis_input', '')}", f"Dataset revision: {summary.get('dataset_revision', '')}", f"Field processing: {json.dumps(summary.get('processing_history', []), sort_keys=True)}", '']
         lines.append('Candidate Estimate')
         lines.append('------------------')
         if 'candidate_latitude' in summary:
@@ -1008,7 +1040,8 @@ class MainWindow(QMainWindow):
                 f"UTM zone: {summary.get('utm_zone', '?')}",
                 f"UTM Easting:  {summary['candidate_easting_m']:.2f} m",
                 f"UTM Northing: {summary['candidate_northing_m']:.2f} m",
-                f"Uncertainty radius: {summary['candidate_radius_m']:.2f} m",
+                f"Cluster spread radius: {summary['candidate_radius_m']:.2f} m",
+                'Spread definition: weighted RMS distance of supporting windows from the cluster center.',
                 f"Supporting windows: {summary['candidate_points']}",
             ])
             if 'candidate_distance_to_well_m' in summary:
@@ -1068,7 +1101,7 @@ class MainWindow(QMainWindow):
         ax_field = self.ow_field_figure.add_subplot(111)
         ordered = clean_df.sort_values('Time (s)').reset_index(drop=True)
         ax_field.plot(ordered['Time (s)'], ordered['BT'], color='#111827', linewidth=0.9)
-        ax_field.set_title('Cleaned total magnetic field', pad=12)
+        ax_field.set_title('Analysis field: ' + self.ow_summary_data.get('analysis_input', 'Cleaned total field'), pad=12)
         ax_field.set_xlabel('Time (s)')
         ax_field.set_ylabel('BT (uT)')
         ax_field.margins(x=0.01)
@@ -1137,7 +1170,7 @@ class MainWindow(QMainWindow):
                 edgecolors='none',
                 zorder=2,
             )
-            self.ow_cluster_figure.colorbar(scatter, ax=ax_map, fraction=0.038, pad=0.02, label='Anomaly score')
+            self.ow_cluster_figure.colorbar(scatter, ax=ax_map, fraction=0.038, pad=0.02, label='Anomaly score',panchor=False)
             hits = score_points[score_points['is_hit']]
             if not hits.empty:
                 ax_map.scatter(
@@ -1177,7 +1210,7 @@ class MainWindow(QMainWindow):
                     s=90 if selected else 60,
                     edgecolors='white',
                     linewidths=0.7,
-                    label='selected candidate' if selected else None,
+                    label='estimated location' if selected else None,
                     zorder=6 if selected else 4,
                 )
                 ax_map.annotate(
@@ -1187,31 +1220,23 @@ class MainWindow(QMainWindow):
                     textcoords='offset points',
                     fontsize=8,
                 )
-        title = 'Score windows, clusters, and candidate'
-        if well is None:
-            title += ' (unknown true location)'
+        title = 'Estimated location and magnetic anomalies'
         ax_map.set_title(title, pad=12)
         zone = ow.utm_zone_label(epsg)
         ax_map.set_xlabel(f'UTM {zone} Easting (m)')
         ax_map.set_ylabel(f'UTM {zone} Northing (m)')
         ax_map.set_aspect('equal', adjustable='box')
+        ax_map.set_anchor('C')
         ax_map.legend(loc='upper left', fontsize=8, frameon=True)
         self.style_orphan_axis(ax_map)
         self.ow_cluster_canvas.draw_idle()
 
     def plot_orphan_mode_metrics(self):
-        self.ow_modes_figure.clear()
-        ax_modes = self.ow_modes_figure.add_subplot(111)
-        if self.ow_mode_metrics is not None and not self.ow_mode_metrics.empty:
-            colors = ['#0F766E' if bool(v) else '#94A3B8' for v in self.ow_mode_metrics['selected']]
-            ax_modes.bar(self.ow_mode_metrics['mode'], self.ow_mode_metrics['energy_ratio'], color=colors, width=0.72)
-        else:
-            ax_modes.text(0.5, 0.5, 'No mode metrics', ha='center', va='center', transform=ax_modes.transAxes)
-        ax_modes.set_title('VMD mode energy selection', pad=12)
-        ax_modes.set_xlabel('Mode')
-        ax_modes.set_ylabel('Energy ratio')
-        self.style_orphan_axis(ax_modes)
-        self.ow_modes_canvas.draw_idle()
+        if self.ow_modes is None or self.ow_clean_df is None:
+            self.ow_vmd_panel.clear();return
+        frame=self.ow_clean_df.sort_values('Time (s)').reset_index(drop=True)
+        self.ow_vmd_panel.set_data(frame['Time (s)'].to_numpy(),frame['Analysis_Field_uT'].to_numpy(),
+            self.ow_modes,self.ow_mode_metrics,self.ow_selected_modes,'Time (s)')
 
     def refresh_orphan_geoxai(self, clean_df, score_points, clusters, summary):
         if not hasattr(self, 'ow_geoxai_text'):
@@ -1223,7 +1248,8 @@ class MainWindow(QMainWindow):
             summary,
             reference_known='candidate_distance_to_well_m' in summary,
         )
-        self.ow_geoxai_text.setText(report.narrative)
+        self.ow_geoxai_report=report
+        self.ow_geoxai_text.setPlainText(report.narrative)
 
         self.ow_geoxai_figure.clear()
         if report.contributions.empty and report.cluster_scores.empty:
@@ -1253,12 +1279,12 @@ class MainWindow(QMainWindow):
                 '#111827' if bool(v) else '#94A3B8'
                 for v in scored['selected_by_support_compactness'].astype(bool)
             ]
-            ax_clusters.barh(labels, scored['geo_xai_confidence'], color=colors)
-            ax_clusters.set_xlim(0, 1)
-            ax_clusters.set_title('Cluster confidence comparison', pad=12)
-            ax_clusters.set_xlabel('GeoXAI confidence')
+            ax_clusters.barh(labels, 100*scored['geo_xai_confidence'], color=colors)
+            ax_clusters.set_xlim(0, 100)
+            ax_clusters.set_title('Cluster Evidence Scores', pad=12)
+            ax_clusters.set_xlabel('XAI Evidence Score (0–100)')
             for index, value in enumerate(scored['geo_xai_confidence']):
-                ax_clusters.text(float(value) + 0.015, index, f'{100.0 * float(value):.0f}', va='center', fontsize=8)
+                ax_clusters.text(100.0*float(value) + 1.5, index, f'{100.0 * float(value):.0f}', va='center', fontsize=8)
         else:
             ax_clusters.text(0.5, 0.5, 'No clusters', ha='center', va='center', transform=ax_clusters.transAxes)
         self.style_orphan_axis(ax_clusters)
@@ -1495,117 +1521,45 @@ class MainWindow(QMainWindow):
             return False
 
     def select_display_file(self, index):
-        file_entry = self.select_file.itemData(index, Qt.ItemDataRole.UserRole)
-        current_index = self.select_file.currentIndex()
-        print(f'current index: {current_index}')
-        if current_index != -1:
-            self.active_dataset_index = current_index
+        if not hasattr(self, 'sessions') or index < 0 or index >= len(self.sessions):
+            return
         try:
-            if current_index in self.processed_dfs:
-                # Already processed, just display
-                self.display_processed_df(self.processed_dfs[current_index])
-            else:
-                # First time, process and cache
-                self.excel_reader(df=self.df_list[current_index], cache_index=current_index)
+            self.activate_survey(index)
+        except Exception as exc:
+            self.select_file.blockSignals(True)
+            self.select_file.setCurrentIndex(self.active_dataset_index)
+            self.select_file.blockSignals(False)
+            self.clear_orphan_results(f'Survey unavailable: {exc}')
+            self.statusBar().showMessage(str(exc))
 
-        except ValueError:
-            self.statusBar().showMessage('File not selected. Try again.')
-            return False
-
-    def excel_reader(self, df, cache_index=None):#, file_path):
-        self.active_filters = []
-        self.plot_tabs.clear()
-
-        # Use cached dialog config if available, otherwise use current dialog values
-        if cache_index is not None and cache_index in self.dialog_configs:
-            config = self.dialog_configs[cache_index]
-            bx, by, bz, bt, lat, lon, loc_time, mag_time, total_time, use_single_time = config
-        else:
-            bx = self.dlg.BX
-            by = self.dlg.BY
-            bz = self.dlg.BZ
-            bt = self.dlg.BT
-            lat = self.dlg.Lat
-            lon = self.dlg.Lon
-            loc_time = self.dlg.LocTime
-            mag_time = self.dlg.MagTime
-            total_time = self.dlg.TotalTime
-            use_single_time = self.dlg.SingleTime.isChecked()
-
-            # Cache the config for this file
-            if cache_index is not None:
-                self.dialog_configs[cache_index] = (bx, by, bz, bt, lat, lon, loc_time, mag_time, total_time, use_single_time)
-
-        if not bt:
-            mag_columns = [f'{bx}', f'{by}', f'{bz}']
-            rename_mag_columns = {f'{bx}': 'X (µT)', f'{by}': 'Y (µT)', f'{bz}': 'Z (µT)'}
-        else:
-            mag_columns = [f'{bt}']
-            rename_mag_columns = {f'{bt}': 'BT'}
-
-        # Handle time columns based on selection
-        if use_single_time:
-            time_columns = [f'{total_time}']
-            rename_time_columns = {f'{total_time}': 'Mag_Time (s)'}
-            gps_time_col = f'{total_time}'
-        else:
-            time_columns = [f'{mag_time}', f'{loc_time}']
-            rename_time_columns = {f'{mag_time}': 'Mag_Time (s)', f'{loc_time}': 'Loc_Time (s)'}
-            gps_time_col = f'{loc_time}'
-
-        mag_columns.extend(time_columns)
-        rename_mag_columns.update(rename_time_columns)
-
-        gps_columns = [f'{lat}', f'{lon}', gps_time_col]
-        rename_gps_columns = {f'{lat}': 'Latitude (°)', f'{lon}': 'Longitude (°)', gps_time_col: 'Loc_Time (s)'}
-
-        self.df = df
-
-        self.magdf = self.df[mag_columns]
-        self.magdf = self.magdf.rename(columns=rename_mag_columns)
-        self.gpsdf = self.df[gps_columns]
-        self.gpsdf = self.gpsdf.rename(columns=rename_gps_columns)
-
-        # Cache magdf and gpsdf for orphan well processing
-        if cache_index is not None:
-            self.mag_gps_dfs[cache_index] = (self.magdf.copy(), self.gpsdf.copy())
-
-        excelreader = er.ExcelReader(self.magdf, self.gpsdf)
-        self.df = excelreader.read_mag_field()
-        #self.df = excelreader.input_sheets()
-        self.df = excelreader.interpolate()
-        #self.df = excelreader.alignTime()
-        self.df = excelreader.convertUTM()
-        self.df = excelreader.distance()
-
-        # Cache the processed result before displaying
-        if cache_index is not None:
-            self.processed_dfs[cache_index] = self.df.copy()
-
-        self.statusBar().showMessage(f'Successfully Loaded {self.file_paths}')
-        self.plot_data(self.df)
-        self.plot_table(self.df)
-        self.new_plot(df=self.df, name='BT', column=self.df['BT'])
-        self.add_menu(columns=self.df.columns)
+    def excel_reader(self, df=None, cache_index=None):
+        # Legacy callers now use the common preprocessing cache.
+        index = self.active_dataset_index if cache_index is None else cache_index
+        self.activate_survey(index)
 
     def add_menu(self, columns):
-        if hasattr(self, 'select_data') and self.select_data:
-            self.edit_menu.removeAction(self.select_data.menuAction())
-            self.select_data.deleteLater()
-        self.select_data = self.edit_menu.addMenu('&Select data')
-        for column in columns:
-            add_column = QAction(column, self)
-            self.select_data.addAction(add_column)
-            add_column.triggered.connect(lambda _, col=column: self.plot_changed(val=col))
+        session=self.active_session()
+        if session is not None:self.data_workspace.update_signal_columns(session.cleaned)
 
-    def display_processed_df(self, df):
-        """Display a previously processed dataframe without re-processing"""
-        self.active_filters = []
-        self.df = df
-        self.plot_tabs.clear()
-        self.statusBar().showMessage(f'Successfully Loaded {self.file_paths}')
-        self.plot_data(self.df)
-        self.plot_table(self.df)
+    def display_processed_df(self,df):
+        self.df=df.copy(deep=True);self.current_df=self.df
+        session=self.active_session()
+        original=session.cleaned if session else self.df
+        signals_blocked=self.plot_tabs.blockSignals(True)
+        try:
+            self.plot_tabs.clear()
+            # Original Map and Data Table remain the reproducible cleaned baseline.
+            self.figure.clear();self.axes=self.figure.add_subplot()
+            mapper=mm.MapMaker(original)
+            mapper.showMap(original,ax=self.axes,cbar_label='Original cleaned total field [uT]')
+            self.axes.set_title('Original survey — cleaned total magnitude')
+            self.canvas.draw_idle()
+            self.plot_table(original)
+            self.new_plot(df=original,name='Total magnitude',column=original['BT'])
+            self.add_menu(original.columns)
+        finally:
+            self.plot_tabs.blockSignals(signals_blocked)
+
 
     def plot_data(self, df, vmin=None, vmax=None, contour=None):
         #clears any previous figures from the canvas widget
@@ -1631,7 +1585,8 @@ class MainWindow(QMainWindow):
 #
     def plot_table(self, df):
         #df = pd.to_numeric(df, errors='coerce')
-        self.model = TableModel.TableModel(df)
+        labels=self.data_workspace.record_labels(df) if hasattr(self,'data_workspace') else None
+        self.model = TableModel.TableModel(df,row_labels=labels)
         self.data.setModel(self.model)
         self.proxyModel = QSortFilterProxyModel()
         self.proxyModel.setSourceModel(self.data.model())
@@ -1659,9 +1614,13 @@ class MainWindow(QMainWindow):
                 ax.set_ylim(ymin, ymax)
             canvas.draw()
 
-    def plot_changed(self, val=None, ymin=None, ymax=None):
-        print(f'success! y axis: {val}')
-        self.new_plot(name=val, df=self.current_df, column=self.current_df[val])
+    def plot_changed(self,val=None,ymin=None,ymax=None):
+        session=self.active_session()
+        if session is not None and val in session.cleaned:
+            frame=session.cleaned
+            self.new_plot(name=val,df=frame,column=frame[val])
+            self.tabs.setCurrentWidget(self.data_workspace)
+            self.data_workspace.tabs.setCurrentWidget(self.plot_widget)
 
     def filter_suffix(self, column):
         """Label for plots of filtered BT, e.g. ' - Upward Continuation'. Other columns
@@ -1674,30 +1633,39 @@ class MainWindow(QMainWindow):
             return ' - ' + ' + '.join(labels)
         return ''
 
-    def new_plot(self, df, name, ymin=None, ymax=None, column=None, ax=None):
-        #BT plots follow the Residual Map setting, like the map
-        if getattr(column, 'name', None) == 'BT' and df is not None:
-            view = self.map_view(df)
-            if view is not df:
-                df, column = view, view['BT']
-        suffix = self.filter_suffix(column)
-        name = f'{name}{suffix}'
-        title = f'Total Magnetic Field v Time{suffix}'
-        fig = Figure()
-        #plot_layout = QStackedLayout()
-        plot_axes = fig.add_subplot()
-        self.plotter = plot.PlotData(df)
-        self.plotter.plot(val=column, ax=plot_axes, ymin=ymin, ymax=ymax, color=None, title=title)
-        plot_canvas = FigureCanvas(fig)
-        plot_tabs = QWidget()
-        plot_layout = QVBoxLayout()
-        plot_layout.addWidget(plot_canvas)
-        plot_tabs.setLayout(plot_layout)
-        plot_tabs.column = column
-        plot_tabs.df = df
-        plot_tabs.title = title
-        self.plot_tabs.addTab(plot_tabs, f'{name}')
-        plot_canvas.draw()
+    def close_signal_plot(self, index):
+        """Close only this display; the survey column remains available to reopen."""
+        page = self.plot_tabs.widget(index)
+        if page is None:
+            return
+        self.plot_tabs.removeTab(index)
+        page.deleteLater()
+
+    def new_plot(self,df,name,ymin=None,ymax=None,column=None,ax=None):
+        if column is None:return
+        for index in range(self.plot_tabs.count()):
+            existing=self.plot_tabs.widget(index)
+            if getattr(existing,'signal_column',None)==getattr(column,'name',None):
+                self.plot_tabs.setCurrentIndex(index);return
+        fig=Figure(constrained_layout=True);axes=fig.add_subplot()
+        axes.set_title(name+' versus time');axes.set_xlabel('Time (s)');axes.set_ylabel(str(getattr(column,'name',name)))
+        canvas=FigureCanvas(fig);page=QWidget();layout=QVBoxLayout(page);layout.addWidget(canvas,1)
+        toolbar=NavigationToolbar2QT(canvas,page);compact_toolbar(toolbar);layout.addWidget(toolbar)
+        page.column=column;page.df=df;page.signal_column=getattr(column,'name',None);page.title=name+' versus time'
+        def draw_signal(frame,style):
+            key=page.signal_column
+            if key not in frame:return
+            axes.clear();x=frame['Time (s)'];y=frame[key]
+            if style=='Line':axes.plot(x,y,lw=.8,color='#0f766e')
+            if style=='Scatter':axes.scatter(x,y,s=36,marker='o',color='hotpink',edgecolors='black',linewidths=1.0)
+            axes.set_title(page.title);axes.set_xlabel('Time (s)');axes.set_ylabel(str(key));axes.grid(alpha=.2)
+            page.df=frame;page.column=frame[key];toolbar.update();canvas.draw_idle()
+        page.draw_signal=draw_signal
+        workspace=getattr(self,'data_workspace',None)
+        source=df
+        if workspace is not None and workspace.signal_source.currentIndex()==1 and workspace.raw is not None:source=workspace.raw
+        draw_signal(source,workspace.signal_style.currentText() if workspace is not None else 'Line')
+        self.plot_tabs.addTab(page,'Total Magnitude' if name=='Total magnitude' else name);self.plot_tabs.setCurrentWidget(page);canvas.draw_idle()
 
 
     def web_map(self):
@@ -1744,39 +1712,24 @@ class MainWindow(QMainWindow):
         self.plot_data(df=self.current_df, vmin=self.vmin, vmax=self.vmax, contour=contour)
         self.update_current_plot(ymin=self.vmin, ymax=self.vmax)
 
-    def filtered_scale_changed(self, df, contour=None, status_message=None, filters=None):
-        #checks if v values were assigned
-        if not self.assign_optional_v_values():
+    def filtered_scale_changed(self, df, contour=None, status_message=None, filters=None, parameters=None, replace_history=False):
+        session = self.active_session()
+        if session is None:
             return
-        #filters lists every filter now applied to df, used to label the time-series plots
-        if filters is not None:
-            self.active_filters = list(filters)
-        if self.map_view_type.currentText() == CONTOUR_MAP:
-            contour=True
-        #refreshs the graph after clearing
-        self.figure.clear()
-        #replot the figure widget
-        self.axes = self.figure.add_subplot()
-        mapper = mm.MapMaker(df)
+        try:
+            session.set_working(df, self.active_filters if filters is None else filters, parameters=parameters,replace_history=replace_history)
+            if hasattr(self,'project_tools'):self.project_tools.changed()
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Map filter', str(exc))
+            return
+        self.active_filters = list(session.filters)
+        self.residual_cache = None
         self.assign_optional_v_values()
-       # if (vmin, vmax) is None:
-        mapper.showMap(self.map_view(df), ax=self.axes, vmin=self.vmin, vmax=self.vmax, contour=contour,
-                        cbar_label=self.colorbar_label())
-        if status_message is None:
-            status_message = f'Continuation Height={self.H}m' if hasattr(self, 'H') else 'Filter applied'
-        if self.residual_selected() and self.residual_mode() is None:
-            status_message += f' | {IGRF_SKIPPED_MESSAGE}'
-        self.statusBar().showMessage(status_message)
-       # else:
-       #     mapper.showMap(df, ax=self.axes, vmin=vmin, vmax=vmax)
-        self.canvas.draw()
-        self.current_df = df
-        self.map_vmin, self.map_vmax = self.vmin, self.vmax
-        #redraw the BT time series so it matches the filtered map
-        if 'Mag_Time (s)' in df.columns:
-            self.plot_tabs.clear()
-            self.new_plot(df=df, name='BT', column=df['BT'], ymin=self.vmin, ymax=self.vmax)
-        self.refresh_web_map()
+        self.display_processed_df(session.working)
+        self.update_field_labels()
+        if self.ow_input.currentIndex() == 1:
+            self.run_orphan_analysis()
+        self.statusBar().showMessage(status_message or 'Map field updated; analysis input is shown in Anomaly Explorer.')
 
     def map_view_changed(self):
         """Map View dropdown changed: switch between point, contour and web maps."""
@@ -1866,21 +1819,13 @@ class MainWindow(QMainWindow):
             self.redraw_map_views()
 
     def redraw_map_views(self):
-        """Redraw the map, web map and BT time series from the current data."""
-        if getattr(self, 'current_df', None) is None:
+        if self.active_session() is None:
             return
-        contour = True if self.map_view_type.currentText() == CONTOUR_MAP else None
-        self.plot_data(self.current_df, vmin=self.map_vmin, vmax=self.map_vmax, contour=contour)
-        if 'Mag_Time (s)' in self.current_df.columns:
-            self.plot_tabs.clear()
-            self.new_plot(df=self.current_df, name='BT', column=self.current_df['BT'])
-        mode = self.residual_mode()
-        if mode is not None:
-            self.statusBar().showMessage(f'Showing {RESIDUAL_LABELS[mode]} BT')
-        elif self.residual_selected():
-            self.statusBar().showMessage(IGRF_SKIPPED_MESSAGE)
-        else:
-            self.statusBar().showMessage('Showing total BT')
+        self.residual_cache = None
+        self.display_processed_df(self.active_session().working)
+        self.update_field_labels()
+        if self.ow_input.currentIndex() == 1:
+            self.run_orphan_analysis()
 
 
     def clear_data(self, df):
@@ -1889,32 +1834,18 @@ class MainWindow(QMainWindow):
         self.figure.clear()
         self.canvas.draw()
 
-    def upward_continuation(self, df):
-        #calls the magnetic filtering class
-        filters = mf.MapFilter(self.df)
-        #reads the continuation height assigned by the user
-        self.assign_continuation_height()
-        if self.H == 0:
-            self.scale_changed(self.df)
-            #self.plot_data(self.df)
-        else:
-            #runs data through upward continuation filter
-            df = filters.upward_continuation(H=self.H)
-            self.filtered_scale_changed(df, filters=['Upward Continuation'])
+    def upward_continuation(self, df=None):
+        if self.active_session() is None or not self.assign_continuation_height():
+            return
+        result = mf.MapFilter(self.current_df).upward_continuation(H=self.H)
+        self.filtered_scale_changed(result, filters=self.active_filters + ['Upward Continuation'], parameters={'height_m': self.H})
 
 
-    def downward_continuation(self, df):
-        #calls the magnetic filtering class
-        filters = mf.MapFilter(self.df)
-        #reads the continuation height assigned by the user
-        self.assign_continuation_height()
-        if self.H == 0:
-            self.scale_changed(self.df)
-            #self.plot_data(self.df)
-        else:
-            #runs data through downward continuation filter
-            df = filters.downward_continuation(H=self.H)
-            self.filtered_scale_changed(df, filters=['Downward Continuation'])
+    def downward_continuation(self, df=None):
+        if self.active_session() is None or not self.assign_continuation_height():
+            return
+        result = mf.MapFilter(self.current_df).downward_continuation(H=self.H)
+        self.filtered_scale_changed(result, filters=self.active_filters + ['Downward Continuation'], parameters={'height_m': self.H})
             #self.plot_data(df)
            # self.plot_data(df)
 
@@ -1935,7 +1866,8 @@ class MainWindow(QMainWindow):
             df,
             status_message=f'RTP filter applied for {self.date_year}-{self.date_month:02d}-{self.date_day:02d}',
             #RTP runs on the data already on the map, so it adds to any earlier filters
-            filters=self.active_filters + ['Reduction to Pole']
+            filters=self.active_filters + ['Reduction to Pole'],
+            parameters={'survey_date': [self.date_year, self.date_month, self.date_day]}
         )
 
     def variational_mode_decomposition(self, df=None):
@@ -1959,26 +1891,31 @@ class MainWindow(QMainWindow):
             filtered_df,
             status_message=f'VMD filter applied using selected modes {modes_text}',
             #VMD runs on the data already on the map, so it adds to any earlier filters
-            filters=self.active_filters + ['VMD']
+            filters=self.active_filters + ['VMD'],
+            parameters={'k_modes': 10, 'alpha': 2000.0, 'selected_modes': selected_modes}
         )
 
     def reset_map(self):
-        #clear the user-entered scale so later filters don't reapply it
+        session = self.active_session()
+        if session is None:
+            return
+        session.reset_field()
+        self.active_filters = []
+        self.residual_cache = None
         self.set_vmin.clear()
         self.set_vmax.clear()
-        self.vmin = None
-        self.vmax = None
-        #the file selector stays at -1 after an import, so fall back to the last displayed dataset
-        index = self.select_file.currentIndex()
-        if index == -1:
-            index = self.active_dataset_index
-        if index not in self.processed_dfs:
-            self.statusBar().showMessage('No data loaded to reset.')
-            return
-        #redisplay the cached unfiltered data, copied so later filters can't modify the cache
-        self.display_processed_df(self.processed_dfs[index].copy())
-        self.new_plot(df=self.df, name='BT', column=self.df['BT'])
-        self.statusBar().showMessage('Data Successfully Reset')
+        self.vmin = self.vmax = self.map_vmin = self.map_vmax = None
+        self.residual_method.blockSignals(True)
+        self.residual_method.setCurrentText(TOTAL_FIELD)
+        self.residual_method.blockSignals(False)
+        self.display_processed_df(session.working)
+        self.update_field_labels()
+        self.filters_workspace.session_changed()
+        self.data_workspace.refresh()
+        self.run_orphan_analysis()
+        self.filters_workspace.session_changed()
+        self.statusBar().showMessage('Restored the shared cleaned survey field.')
+        if hasattr(self,'project_tools'):self.project_tools.changed()
 
     def reset_chart(self):
         self.plot.clear()
@@ -2030,7 +1967,7 @@ class MainWindow(QMainWindow):
 
         written = []
         try:
-            pd.DataFrame(self.map_view(self.current_df)).to_csv(csv_path, index=False)
+            self.active_session().cleaned.to_csv(csv_path, index=False)
             written.append(csv_path)
             self.canvas.print_figure(str(map_path))
             written.append(map_path)
@@ -2045,7 +1982,7 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage(f'Dataset Successfully Exported to {base_path.parent} ({len(written)} files)')
     def export_orphan_results(self):
-        """Save the OrphaMag results: scored points, candidate clusters, summary and engineering map."""
+        """Save the Anomaly Explorer results: scored points, candidate clusters, summary and engineering map."""
         if self.ow_annotated_df is None:
             self.statusBar().showMessage('No orphan-well results to export. Import a dataset first.')
             return
@@ -2055,10 +1992,10 @@ class MainWindow(QMainWindow):
         index = self.ow_selected_dataset_index
         if index is not None and 0 <= index < self.select_file.count():
             source_path = Path(self.select_file.itemData(index, Qt.ItemDataRole.UserRole))
-            default_path = str(source_path.with_name(f'{source_path.stem}_orphamag.csv'))
+            default_path = str(source_path.with_name(f'{source_path.stem}_anomalies.csv'))
         file_path, _ = QFileDialog.getSaveFileName(
             self,
-            'Export OrphaMag Results',
+            'Export Anomaly Explorer Results',
             default_path,
             'CSV files (*.csv)',
         )
@@ -2069,10 +2006,10 @@ class MainWindow(QMainWindow):
         points_path = base_path.with_suffix('.csv')
         output_paths = [points_path] + [
             base_path.with_name(f'{base_path.name}{suffix}')
-            for suffix in ('_clusters.csv', '_summary.txt', '_engineering_map.png')
+            for suffix in ('_clusters.csv', '_summary.txt', '_engineering_map.png', '_xai_explanation.txt', '_xai_contributions.csv', '_xai_clusters.csv', '_xai.png')
         ]
         if any(self.is_imported_file(path) for path in output_paths):
-            QMessageBox.warning(self, 'OrphaMag Export', 'That name would overwrite an imported data file. Choose a different name.')
+            QMessageBox.warning(self, 'Anomaly Explorer Export', 'That name would overwrite an imported data file. Choose a different name.')
             return
         written = [points_path]
         try:
@@ -2085,14 +2022,22 @@ class MainWindow(QMainWindow):
             summary_path.write_text(self.ow_summary.toPlainText(), encoding='utf-8')
             written.append(summary_path)
             map_path = base_path.with_name(f'{base_path.name}_engineering_map.png')
+            report=getattr(self,'ow_geoxai_report',None)
+            if report is not None:
+                for suffix,content in [('_xai_explanation.txt',report.narrative),('_xai_contributions.csv',report.contributions),('_xai_clusters.csv',report.cluster_scores)]:
+                    path=base_path.with_name(base_path.name+suffix)
+                    if isinstance(content,str):path.write_text(content,encoding='utf-8')
+                    else:content.to_csv(path,index=False)
+                    written.append(path)
+                xai_path=base_path.with_name(base_path.name+'_xai.png');self.ow_geoxai_figure.savefig(xai_path,dpi=200,bbox_inches='tight');written.append(xai_path)
             self.ow_cluster_figure.savefig(map_path, dpi=200, bbox_inches='tight')
             written.append(map_path)
         except Exception as exc:
-            QMessageBox.warning(self, 'OrphaMag Export', f'Export failed:\n{exc}')
-            self.statusBar().showMessage('OrphaMag export failed.')
+            QMessageBox.warning(self, 'Anomaly Explorer Export', f'Export failed:\n{exc}')
+            self.statusBar().showMessage('Anomaly Explorer export failed.')
             return
 
-        self.statusBar().showMessage(f'OrphaMag results exported to {base_path.parent} ({len(written)} files)')
+        self.statusBar().showMessage(f'Anomaly Explorer results exported to {base_path.parent} ({len(written)} files)')
 
     #def sampling frequency
     #   add ability to set sampling frequency and adjust the filters class so it's not static at d=1
@@ -2107,5 +2052,7 @@ if __name__ == '__main__':
     window.show()
     if len(sys.argv) > 1:
         startup_file = sys.argv[1]
-        QTimer.singleShot(250, lambda: window.load_orphan_well_file(startup_file))
+        if Path(startup_file).suffix.lower() in ('.smmproj','.bak1','.bak2','.bak3'):
+            QTimer.singleShot(250, lambda: window.project_tools.open_project(path=Path(startup_file)))
+        else:QTimer.singleShot(250, lambda: window.load_orphan_well_file(startup_file))
     sys.exit(app.exec())
