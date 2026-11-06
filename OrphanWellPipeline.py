@@ -47,6 +47,7 @@ class OrphanWellParams:
     well_lon: float | None = None
     startup_samples: int = 10
     spatial_mad_multiplier: float = 6.0
+    spatial_fallback_percentile: float = 95.0
     window_length_m: float = 5.0
     step_ratio: float = 0.25
     gamma: float = 2.0
@@ -138,12 +139,20 @@ def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
 def _standardize_magnetometer(df: pd.DataFrame) -> pd.DataFrame:
     df = _flat_columns(df)
     time_col = _find_column(df, ["Mag_Time (s)", "Magnetometer_Time (s)", "Time (s)", "time"])
-    x_col = _find_column(df, ["X (uT)", "X (µT)", "Magnetic field x (uT)", "Magnetometer_X (uT)", "BX"])
-    y_col = _find_column(df, ["Y (uT)", "Y (µT)", "Magnetic field y (uT)", "Magnetometer_Y (uT)", "BY"])
-    z_col = _find_column(df, ["Z (uT)", "Z (µT)", "Magnetic field z (uT)", "Magnetometer_Z (uT)", "BZ"])
-    out = df[[time_col, x_col, y_col, z_col]].copy()
-    out.columns = ["Mag_Time (s)", "X (µT)", "Y (µT)", "Z (µT)"]
-    return _coerce_numeric(out).dropna(subset=["Mag_Time (s)", "X (µT)", "Y (µT)", "Z (µT)"])
+    components = [
+        _find_column(df, [f"{axis} (uT)", f"{axis} (µT)", f"Magnetic field {axis.lower()} (uT)",
+                          f"Magnetometer_{axis} (uT)", f"B{axis}"], required=False)
+        for axis in "XYZ"
+    ]
+    if all(col is not None for col in components):
+        out = df[[time_col] + components].copy()
+        out.columns = ["Mag_Time (s)", "X (µT)", "Y (µT)", "Z (µT)"]
+    else:
+        scalar = _find_column(df, ["BT", "Total_Field_uT", "Total magnetic field (uT)",
+                                   "Magnetic field (uT)", "B (uT)"])
+        out = df[[time_col, scalar]].copy()
+        out.columns = ["Mag_Time (s)", "BT"]
+    return _coerce_numeric(out).replace([np.inf, -np.inf], np.nan).dropna()
 
 
 def _standardize_location(df: pd.DataFrame) -> pd.DataFrame:
@@ -180,19 +189,26 @@ def read_survey_file(path: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
             return _standardize_magnetometer(mag_sheet), _standardize_location(loc_sheet)
         first = next(iter(sheets.values()))
         return _standardize_magnetometer(first), _standardize_location(first)
-    if suffix == ".csv":
-        df = pd.read_csv(path)
+    if suffix in {".csv", ".txt"}:
+        df = pd.read_csv(path, sep=None, engine="python")
         return _standardize_magnetometer(df), _standardize_location(df)
     raise ValueError(f"Unsupported survey file type: {path.suffix}")
 
 
-def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellParams) -> tuple[pd.DataFrame, dict[str, Any]]:
-    mag = _standardize_magnetometer(magdf) if "Mag_Time (s)" not in magdf.columns else _coerce_numeric(magdf)
-    gps = _standardize_location(gpsdf) if "Loc_Time (s)" not in gpsdf.columns else _coerce_numeric(gpsdf)
+def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellParams, *, synchronized_only=False) -> tuple[pd.DataFrame, dict[str, Any]]:
+    mag = _standardize_magnetometer(magdf)
+    gps = _standardize_location(gpsdf).replace([np.inf, -np.inf], np.nan).dropna()
+    if mag.empty or gps.empty:
+        raise ValueError("The survey needs valid magnetic and location records.")
+    if not gps["Latitude (°)"].between(-80, 84).all() or not gps["Longitude (°)"].between(-180, 180).all():
+        raise ValueError("UTM analysis requires latitude between -80 and 84 and longitude between -180 and 180 degrees.")
 
     mag = mag.sort_values("Mag_Time (s)").drop_duplicates("Mag_Time (s)").reset_index(drop=True)
     gps = gps.sort_values("Loc_Time (s)").drop_duplicates("Loc_Time (s)").reset_index(drop=True)
-    mag["Total_Field_uT"] = np.sqrt(mag["X (µT)"] ** 2 + mag["Y (µT)"] ** 2 + mag["Z (µT)"] ** 2)
+    if all(col in mag.columns for col in ["X (µT)", "Y (µT)", "Z (µT)"]):
+        mag["Total_Field_uT"] = np.sqrt(mag["X (µT)"] ** 2 + mag["Y (µT)"] ** 2 + mag["Z (µT)"] ** 2)
+    else:
+        mag["Total_Field_uT"] = mag["BT"]
 
     gt = gps["Loc_Time (s)"].to_numpy(dtype=float)
     mt = mag["Mag_Time (s)"].to_numpy(dtype=float)
@@ -206,7 +222,7 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellPar
 
     interpolated = mag.dropna(subset=["Latitude (°)", "Longitude (°)"]).reset_index(drop=True)
     before_startup = len(interpolated)
-    startup = max(0, int(params.startup_samples))
+    startup = 0 if synchronized_only else max(0, int(params.startup_samples))
     if startup:
         interpolated = interpolated.iloc[startup:].reset_index(drop=True)
 
@@ -230,9 +246,11 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellPar
     if mad_r > 0:
         limit = med_r + float(params.spatial_mad_multiplier) * mad_r
     else:
-        limit = float(np.nanpercentile(radial, 95))
-    keep = radial <= limit
+        limit = float(np.nanpercentile(radial, params.spatial_fallback_percentile))
+    keep = np.ones(len(radial), dtype=bool) if synchronized_only else radial <= limit
     cleaned = interpolated.loc[keep].reset_index(drop=True)
+    if len(cleaned) < 8:
+        raise ValueError("Fewer than 8 samples remain after synchronization and cleaning. Check timestamps and startup removal.")
 
     cleaned["Time (s)"] = cleaned["Mag_Time (s)"]
     cleaned["BT"] = cleaned["Total_Field_uT"]
@@ -250,6 +268,8 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellPar
         "spatial_removed": int((~keep).sum()),
         "cleaned_rows": int(len(cleaned)),
         "spatial_limit_m": float(limit),
+        "spatial_rule": "MAD" if mad_r > 0 else "percentile fallback",
+        "fallback_percentile": float(params.spatial_fallback_percentile),
     }
     return cleaned, audit
 
@@ -302,9 +322,9 @@ def median_speed_and_dt(df: pd.DataFrame) -> tuple[float, float]:
     return max(speed_med, 0.01), max(dt_med, 1e-3)
 
 
-def run_vmd_modes(df: pd.DataFrame, params: OrphanWellParams) -> tuple[np.ndarray, pd.DataFrame, list[int]]:
+def run_vmd_modes(df: pd.DataFrame, params: OrphanWellParams, field_column: str = "Total_Field_uT") -> tuple[np.ndarray, pd.DataFrame, list[int]]:
     ordered = df.sort_values("Time (s)").reset_index(drop=True)
-    signal = ordered["Total_Field_uT"].to_numpy(dtype=float)
+    signal = ordered[field_column].to_numpy(dtype=float)
     signal = signal - np.nanmedian(signal)
     _, dt_med = median_speed_and_dt(ordered)
     if VMD is not None and len(signal) >= params.vmd_modes * 4:
@@ -320,6 +340,10 @@ def run_vmd_modes(df: pd.DataFrame, params: OrphanWellParams) -> tuple[np.ndarra
         modes = np.asarray(modes, dtype=float)
     else:
         modes = _fallback_modes(signal, int(params.vmd_modes))
+    # vmdpy truncates odd-length input by one sample. Preserve the survey row axis.
+    if modes.shape[1] < len(signal):
+        modes = np.pad(modes, ((0, 0), (0, len(signal) - modes.shape[1])), mode="edge")
+    modes = modes[:, :len(signal)]
     modes, original_order = sort_modes_by_rate(modes, dt_med)
     metrics = mode_metrics(modes, signal, dt_med)
     selected_modes = select_modes(metrics, max_modes=int(params.max_selected_modes))
@@ -334,7 +358,7 @@ def _fallback_modes(signal: np.ndarray, k_modes: int) -> np.ndarray:
     for window in np.linspace(5, 101, max(1, k_modes)).astype(int):
         window = int(max(3, window + (window % 2 == 0)))
         kernel = np.ones(window) / window
-        smooth = np.convolve(residual, kernel, mode="same")
+        smooth = np.convolve(np.pad(residual, (window // 2, window // 2), mode="edge"), kernel, mode="valid")
         modes.append(residual - smooth)
         residual = smooth
     return np.asarray(modes, dtype=float)
