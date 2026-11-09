@@ -181,10 +181,12 @@ class FilterComparison(QWidget):
         for key,control in [('window',self.lab.window_length),('low',self.lab.low),('high',self.lab.high),('k_modes',self.lab.k),('alpha',self.lab.alpha),('cell_size',self.lab.cell),('height',self.lab.height),('max_gain',self.lab.gain),('inclination',self.lab.inc),('declination',self.lab.dec)]:
             if key in r.settings:control.setValue(r.settings[key])
         if r.settings['method']=='Reduction to pole':self.lab.direction_confirm.setCurrentIndex(1)
-        self.lab.result=r;self.lab.preview_revision=session.revision
-        self.lab.draw_comparison()
-        self.lab.vmd.clear()
-        if r.modes is not None:self.lab.vmd.set_data(r.mode_axis,r.mode_signal,r.modes,r.metrics,r.selected,r.axis_label)
+        from Busy import busy
+        with busy(self,f'Loading saved result {self.slot.currentText()}...'):
+            self.lab.result=r;self.lab.preview_revision=session.revision
+            self.lab.draw_comparison()
+            self.lab.vmd.clear()
+            if r.modes is not None:self.lab.vmd.set_data(r.mode_axis,r.mode_signal,r.modes,r.metrics,r.selected,r.axis_label)
         # Apply uses recorded settings rather than whatever is currently selected in the form.
         ok=self.lab.apply()
         if ok:self.message.setText('Saved result '+self.slot.currentText()+' is now the current field. Analysis input remains an explicit choice.')

@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QLabel, QMainWindow,
                              QRadioButton, QComboBox, QTabWidget, QTableView,
                              QHeaderView, QStackedLayout, QGroupBox,
                              QFormLayout, QDoubleSpinBox, QSpinBox, QTextEdit,
-                             QSplitter, QScrollArea)
+                             QSplitter, QScrollArea, QStyleFactory)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
@@ -27,11 +27,11 @@ from VMDPanel import VMDPanel
 import MapFilter as mf
 import MapMaker as mm
 import DialogWindow as dw
-import PlotData as plot
 import WebMap as wm
 import TableModel
 import OrphanWellPipeline as ow
 import GeoXAIInterpreter as gx
+from Busy import busy
 import sys, os, tempfile, json
 
 #choices in the Map View dropdown
@@ -120,8 +120,7 @@ class MainWindow(QMainWindow):
         self.axes = self.figure.add_subplot()
         #creates a canvas to display figure
         self.canvas = FigureCanvas(self.figure)
-        #creates the toolbar
-        self.create_toolbar()
+        #the menu bar is built by ProjectTools.build_menus
         #creating a status bar
         self.setStatusBar(QStatusBar(self))
         self.ow_file_path = None
@@ -467,7 +466,7 @@ class MainWindow(QMainWindow):
         self.ow_fallback_percentile.setRange(50,100)
         self.ow_fallback_percentile.setValue(95)
         self.ow_fallback_percentile.setSuffix(' %')
-        self.ow_fallback_percentile.valueChanged.connect(self.schedule_orphan_reload)
+        self.ow_fallback_percentile.valueChanged.connect(self.cleaning_settings_edited)
         form.addRow('Score window length (m)', self.ow_window_length)
         form.addRow('Window step ratio', self.ow_step_ratio)
         form.addRow('Threshold gamma', self.ow_gamma)
@@ -610,8 +609,9 @@ class MainWindow(QMainWindow):
             self.ow_dbscan_eps,
             self.ow_min_samples,
         ]
+        # Cleaning re-runs only when "Update Cleaning Settings" is clicked.
         for spinbox in clean_widgets:
-            spinbox.valueChanged.connect(self.schedule_orphan_reload)
+            spinbox.valueChanged.connect(self.cleaning_settings_edited)
         for spinbox in analysis_widgets:
             spinbox.valueChanged.connect(self.schedule_orphan_analysis)
         #rerun once a coordinate is finished being typed, not on every keystroke
@@ -663,28 +663,6 @@ class MainWindow(QMainWindow):
         self.next_stage.setEnabled(True)
         self.next_stage.setText('View location estimate' if position==self.ow_visual_tabs.count()-1 else 'Next view')
 
-    def create_toolbar(self):
-        self.toolbar = QToolBar('Survey'); self.toolbar.setMovable(False); self.addToolBar(self.toolbar)
-        import_action=QAction('Import Data',self);import_action.triggered.connect(self.import_data_action)
-        import_action.setShortcut('Ctrl+Shift+I')
-        export_action=QAction('Export Data',self);export_action.triggered.connect(self.export_dialog)
-        self.toolbar.hide()
-        self.menu=self.menuBar();self.file_menu=self.menu.addMenu('File')
-        self.file_menu.addAction(import_action);self.file_menu.addAction(export_action)
-        self.file_menu.addSeparator()
-        filter_export=QAction('Export filter comparison / modes',self)
-        filter_export.triggered.connect(lambda: self.filters_workspace.export())
-        self.file_menu.addAction(filter_export)
-        anomaly_export=QAction('Export anomaly results',self)
-        anomaly_export.triggered.connect(self.export_orphan_results)
-        self.file_menu.addAction(anomaly_export)
-        # Signal-column selection belongs inside Signal Plots.
-
-        #export_actions
-
-    #def create_menu(self):
-        #add menu with actions from toolbar
-
     def commit_filter_result(self,frame,settings):
         if settings['field'] != 'Current result':
             self.active_filters = []
@@ -709,6 +687,7 @@ class MainWindow(QMainWindow):
             QGroupBox { background: white; border: 1px solid #d7e0ea; border-radius: 6px; margin-top: 14px; padding: 12px 8px 8px; }
             QGroupBox::title { subcontrol-origin: margin; left: 10px; color: #15324f; }
             QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit { background: white; color: #172b4d; border: 1px solid #c8d5e2; border-radius: 4px; padding: 5px; }
+            QLineEdit:disabled, QComboBox:disabled, QTextEdit:disabled { color: #8793a3; background: #eef1f5; border: 1px solid #dde4ec; }
             QComboBox QAbstractItemView { background: white; color: #172b4d; selection-background-color: #d4efed; }
             QPushButton { background: #e8f1f6; border: 1px solid #bfd1df; border-radius: 4px; padding: 9px; color: #15324f; }
             QPushButton:pressed, QPushButton:checked { background:#b5ccdf; border:1px solid #54799a; color:#102b46; }
@@ -717,6 +696,7 @@ class MainWindow(QMainWindow):
             QPushButton:hover { background: #d7e9ed; }
             QPushButton:disabled { background: #edf0f4; color: #8896a5; }
             QPushButton#primaryButton { background: #007f86; color: white; }
+            QPushButton#primaryButton:disabled { background: #edf0f4; color: #8896a5; border: 1px solid #d3dce6; }
             QLabel#sectionTitle { font-size: 18pt; font-weight: 700; color: #15324f; padding: 4px; }
             QTableView, QTableWidget { background: white; alternate-background-color: #f1f6fa; gridline-color: #dce4ec; }
             QHeaderView::section { background: #e7edf4; padding: 7px; border: 0; color: #15324f; }
@@ -786,6 +766,8 @@ class MainWindow(QMainWindow):
         self.update_field_labels()
         self.filters_workspace.session_changed()
         self.data_workspace.refresh()
+        # Displayed data now match the cleaning controls.
+        self.data_workspace.set_cleaning_pending(False)
         self.run_orphan_analysis()
 
     def current_map_field_name(self):
@@ -936,6 +918,26 @@ class MainWindow(QMainWindow):
             dbscan_min_samples=int(self.ow_min_samples.value()),
         )
 
+    def cleaning_settings_edited(self, *_):
+        if self.active_session() is None:
+            return
+        self.data_workspace.set_cleaning_pending(True)
+        self.statusBar().showMessage('Cleaning settings changed. Click "Update Cleaning Settings" to apply them.')
+
+    def apply_cleaning_settings(self):
+        if self.active_session() is None:
+            return
+        workspace = self.data_workspace
+        workspace.update_cleaning.setEnabled(False)
+        with busy(self, 'Updating cleaning settings... re-cleaning survey and rerunning analysis.'):
+            ok = self.reload_orphan_well_file()
+        if ok:
+            workspace.set_cleaning_pending(False)
+            session = self.active_session()
+            self.statusBar().showMessage(f'Cleaning settings updated: {len(session.cleaned):,} samples retained.', 8000)
+        else:
+            workspace.update_cleaning.setEnabled(True)
+
     def schedule_orphan_analysis(self):
         if self.active_session() is not None:
             self.ow_update_timer.start(350)
@@ -961,12 +963,14 @@ class MainWindow(QMainWindow):
         if self.active_session() is not None:
             try:
                 self.activate_survey(self.active_dataset_index)
+                return True
             except Exception as exc:
                 self.data_workspace.status.show()
                 self.data_workspace.status.setText(f'Cleaning settings could not be applied: {exc}. Displayed data retain the last successful settings.')
                 self.filters_workspace.invalidate()
                 self.clear_orphan_results(f'Cleaning settings could not be applied: {exc}')
                 self.statusBar().showMessage('Adjust cleaning settings to retain enough valid samples.')
+        return False
 
     def process_orphan_well_dataset(self, *_args):
         self._analysis_mode_key = None
@@ -1442,38 +1446,6 @@ class MainWindow(QMainWindow):
                 f"<h3>Map could not be rendered</h3><p>{str(exc)}</p></body></html>"
             )
 
-    def assign_v_values(self):
-        #self.vmin = self.set_vmin.text()
-        #self.vmax = self.set_vmax.text()
-        valid = True
-        vmin_entry = self.set_vmin.text()
-        if vmin_entry.strip() == '':
-            self.vmin = None
-            self.statusBar().showMessage('Minimum/Maximum Scale Value(s) Not Entered (fill min/max scale fields). Try again.')
-            valid = False
-        try:
-            self.vmin = float(vmin_entry)
-            #self.statusBar().showMessage('Field Scale Changed')
-        except ValueError:
-            #self.statusBar().showMessage('Invalid field value entered (must be a number)')
-            valid = True
-
-        vmax_entry = self.set_vmax.text()
-        if vmax_entry.strip() == '':
-            self.vmax = None
-            self.statusBar().showMessage('Minimum/Maximum Scale Value(s) Not Entered (fill min/max scale fields). Try again.')
-            valid = False
-        try:
-            self.vmax = float(vmax_entry)
-            #self.statusBar().showMessage('Field Scale Changed')
-            #self.statusBar().showMessage(f'Continuation Height={self.Hm')
-
-        except ValueError:
-            #self.statusBar().showMessage('Invalid field value entered (must be a number)')
-            valid = True
-
-        return valid
-
     def assign_optional_v_values(self):
         self.vmin = None
         self.vmax = None
@@ -1597,23 +1569,6 @@ class MainWindow(QMainWindow):
         header = self.data.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
 
-    def update_current_plot(self, ymin=None, ymax=None):
-        idx = self.plot_tabs.currentIndex()
-        current_plot = self.plot_tabs.widget(idx)
-        if current_plot is not None:
-            canvas = current_plot.layout().itemAt(0).widget()
-            fig = canvas.figure
-            ax = fig.axes[0]
-            ax.clear()
-            column = getattr(current_plot, 'column', None)
-            df = getattr(current_plot, 'df', None)
-            if column is not None and df is not None:
-                self.plotter = plot.PlotData(df)
-                self.plotter.plot(val=column, ax=ax, ymin=ymin, ymax=ymax, title=getattr(current_plot, 'title', None))
-            if ymin is not None and ymax is not None:
-                ax.set_ylim(ymin, ymax)
-            canvas.draw()
-
     def plot_changed(self,val=None,ymin=None,ymax=None):
         session=self.active_session()
         if session is not None and val in session.cleaned:
@@ -1657,8 +1612,20 @@ class MainWindow(QMainWindow):
             if key not in frame:return
             axes.clear();x=frame['Time (s)'];y=frame[key]
             if style=='Line':axes.plot(x,y,lw=.8,color='#0f766e')
-            if style=='Scatter':axes.scatter(x,y,s=36,marker='o',color='hotpink',edgecolors='black',linewidths=1.0)
+            if style=='Scatter':axes.scatter(x,y,s=36,marker='o',color='#0f766e',edgecolors='black',linewidths=1.0)
             axes.set_title(page.title);axes.set_xlabel('Time (s)');axes.set_ylabel(str(key));axes.grid(alpha=.2)
+            # Each column uses its Data & Cleaning scale, shared with its cleaning map.
+            scale_source=getattr(self,'data_workspace',None)
+            # Before-cleaning data: mark the samples cleaning removed, as on the cleaning map.
+            removed=scale_source.excluded_rows(frame) if scale_source is not None else None
+            if removed is not None and len(removed):
+                axes.scatter(removed['Time (s)'],removed[key],marker='x',c='#b91c1c',s=28,linewidths=1,zorder=3,label='Excluded')
+                axes.legend(loc='best',fontsize=9)
+            if scale_source is not None:
+                user_lo,user_hi=scale_source.field_scale(key)
+                bottom,top=axes.get_ylim()
+                bottom=bottom if user_lo is None else user_lo;top=top if user_hi is None else user_hi
+                if bottom<top:axes.set_ylim(bottom,top)
             page.df=frame;page.column=frame[key];toolbar.update();canvas.draw_idle()
         page.draw_signal=draw_signal
         workspace=getattr(self,'data_workspace',None)
@@ -1696,21 +1663,6 @@ class MainWindow(QMainWindow):
                 self.web_map_widget.deleteLater()
                 self.web_map_widget = None
             self.canvas.show()
-
-    def scale_changed(self, df, contour=None):
-        #checks if v values were assigned
-        if not self.assign_v_values():
-            return
-        if self.map_view_type.currentText() == CONTOUR_MAP:
-            contour=True
-        #refreshs the graph after clearing
-        self.figure.clear()
-        #replot the figure widget
-        self.axes = self.figure.add_subplot()
-        mapper = mm.MapMaker(self.current_df)
-        self.assign_v_values()
-        self.plot_data(df=self.current_df, vmin=self.vmin, vmax=self.vmax, contour=contour)
-        self.update_current_plot(ymin=self.vmin, ymax=self.vmax)
 
     def filtered_scale_changed(self, df, contour=None, status_message=None, filters=None, parameters=None, replace_history=False):
         session = self.active_session()
@@ -1917,14 +1869,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage('Restored the shared cleaned survey field.')
         if hasattr(self,'project_tools'):self.project_tools.changed()
 
-    def reset_chart(self):
-        self.plot.clear()
-        if self.select_file.currentIndex()!= -1:
-            self.select_display_file(self.select_file.currentIndex())
-        else:
-            self.update_current_plot()
-        #self.plot.draw()
-
     def is_imported_file(self, path):
         """True if path is one of the imported source files, so exports never overwrite raw data."""
         target = Path(path).resolve()
@@ -2048,6 +1992,7 @@ class MainWindow(QMainWindow):
 if __name__ == '__main__':
     catchErrors() # prevent crash of the app
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
     window = MainWindow()
     window.show()
     if len(sys.argv) > 1:

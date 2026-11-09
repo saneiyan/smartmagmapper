@@ -5,19 +5,14 @@ import numpy as np
 import pandas as pd
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QGroupBox,QLabel,
-    QComboBox,QSpinBox,QDoubleSpinBox,QPushButton,QTabWidget,QSplitter,QScrollArea,QFileDialog,QApplication)
+    QComboBox,QSpinBox,QDoubleSpinBox,QPushButton,QTabWidget,QSplitter,QScrollArea,QFileDialog,QApplication,QMessageBox)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import ScientificFilters as sf
 from VMDPanel import VMDPanel
 from PlotTheme import light_figure
 from FilterComparison import FilterComparison
-
-
-class OddWindowSpinBox(QSpinBox):
-    def valueFromText(self, text):
-        value=super().valueFromText(text)
-        return min(self.maximum(), value if value%2 else value+1)
+from Busy import busy, show_status
 
 
 class FilterWorkspace(QWidget):
@@ -34,28 +29,30 @@ class FilterWorkspace(QWidget):
         form=QFormLayout();self.input_form=form
         self.field=QComboBox();self.field.addItems(['Total magnitude','X','Y','Z','Current result'])
         self.domain=QComboBox();self.domain.addItems(['Time','Path distance','Spatial grid'])
-        self.method=QComboBox();self.method.addItems(sf.SERIES_FILTERS+sf.SPATIAL_FILTERS)
+        # Alphabetical list; VMD stays the default selection.
+        self.method=QComboBox();self.method.addItems(sorted(sf.SERIES_FILTERS+sf.SPATIAL_FILTERS,key=str.casefold));self.method.setCurrentText('VMD')
         form.addRow('Signal',self.field);form.addRow('Filter',self.method);form.addRow('Series coordinate',self.domain)
         self.domain.view().setRowHidden(2,True)
         self.processing_label=QLabel();self.processing_label.setWordWrap(True);form.addRow(self.processing_label)
         controls.addLayout(form)
         self.series_group=QGroupBox('Series settings');f=QFormLayout(self.series_group);self.series_form=f
-        self.window_length=OddWindowSpinBox();self.window_length.setRange(3,2001);self.window_length.setSingleStep(2);self.window_length.setValue(11)
-        self.low=QDoubleSpinBox();self.low.setDecimals(5);self.low.setRange(.00001,10000);self.low.setValue(.05);self.low.setSingleStep(.01)
-        self.high=QDoubleSpinBox();self.high.setDecimals(5);self.high.setRange(.00001,10000);self.high.setValue(.5);self.high.setSingleStep(.01)
+        # Limits are deliberately wide: values stay as typed and Preview reports invalid ones in a pop-up.
+        self.window_length=QSpinBox();self.window_length.setRange(1,2001);self.window_length.setSingleStep(2);self.window_length.setValue(11)
+        self.low=QDoubleSpinBox();self.low.setDecimals(5);self.low.setRange(0,10000);self.low.setValue(.05);self.low.setSingleStep(.01)
+        self.high=QDoubleSpinBox();self.high.setDecimals(5);self.high.setRange(0,10000);self.high.setValue(.5);self.high.setSingleStep(.01)
         self.frequency_label=QLabel('Frequency in Hz')
         f.addRow('Window (samples)',self.window_length);f.addRow('Lower / high-pass',self.low);f.addRow('Upper / low-pass',self.high);f.addRow(self.frequency_label)
         self.polynomial_label=QLabel(f'Quadratic - degree {sf.SAVITZKY_POLYORDER} (fixed)')
         self.series_form.addRow('Polynomial',self.polynomial_label)
         controls.addWidget(self.series_group)
         self.vmd_group=QGroupBox('VMD decomposition');f=QFormLayout(self.vmd_group)
-        self.k=QSpinBox();self.k.setRange(2,20);self.k.setValue(10)
-        self.alpha=QDoubleSpinBox();self.alpha.setRange(10,100000);self.alpha.setValue(2000);self.alpha.setSingleStep(100)
+        self.k=QSpinBox();self.k.setRange(1,100);self.k.setValue(10)
+        self.alpha=QDoubleSpinBox();self.alpha.setRange(0,1000000);self.alpha.setValue(2000);self.alpha.setSingleStep(100)
         f.addRow('Number of modes',self.k);f.addRow('Penalty α',self.alpha);controls.addWidget(self.vmd_group)
         self.spatial_group=QGroupBox('Metric grid / field direction');f=QFormLayout(self.spatial_group);self.spatial_form=f
-        self.cell=QDoubleSpinBox();self.cell.setRange(.05,1000);self.cell.setValue(2);self.cell.setSuffix(' m')
-        self.height=QDoubleSpinBox();self.height.setRange(0,1000);self.height.setValue(5);self.height.setSuffix(' m')
-        self.gain=QDoubleSpinBox();self.gain.setRange(1,100);self.gain.setValue(10)
+        self.cell=QDoubleSpinBox();self.cell.setRange(0,1000);self.cell.setValue(2);self.cell.setSuffix(' m')
+        self.height=QDoubleSpinBox();self.height.setRange(-1000,1000);self.height.setValue(5);self.height.setSuffix(' m')
+        self.gain=QDoubleSpinBox();self.gain.setRange(0,1000);self.gain.setValue(10)
         self.inc=QDoubleSpinBox();self.inc.setRange(-90,90);self.inc.setValue(60);self.inc.setSuffix('°')
         self.dec=QDoubleSpinBox();self.dec.setRange(-180,180);self.dec.setValue(0);self.dec.setSuffix('°')
         self.direction_confirm=QComboBox();self.direction_confirm.addItems(['Enter survey field direction…','Direction entered for this survey'])
@@ -202,36 +199,64 @@ class FilterWorkspace(QWidget):
         if session is None:self.message.setText('Import a survey first.');return False
         self.invalidate()
         if self.method.currentText()=='Reduction to pole' and self.direction_confirm.currentIndex()!=1:
-            self.message.setText('Enter the field inclination/declination for this survey and confirm them. Displayed defaults are not site estimates.');return False
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            if self.domain.currentText() == 'Spatial grid' and self.field.currentText() == 'Current result':
-                history=session.filter_history
-                if any(step['parameters'].get('field') in ('X','Y','Z') for step in history):
-                    raise ValueError('Choose Total magnitude for spatial transforms; the current result came from a phone component.')
-            frame=session.working if self.field.currentText()=='Current result' else session.cleaned
-            result=sf.run_filter(frame,self.field.currentText(),self.domain.currentText(),self.method.currentText(),**self.active_parameters())
-            result.settings['input_history']=json.loads(json.dumps(session.filter_history)) if self.field.currentText()=='Current result' else []
-            result.settings['cleaning']={'startup_samples':session.cleaning_key[0],'spatial_mad_multiplier':session.cleaning_key[1],'fallback_percentile':session.cleaning_key[2]}
-            result.settings['source_survey']=Path(session.path).name
-            self.vmd.table.setEnabled(True)
-            self.result=result;self.preview_revision=session.revision
-            self.draw_comparison()
-            if result.modes is not None:
-                self.vmd.set_data(result.mode_axis,result.mode_signal,result.modes,result.metrics,result.selected,result.axis_label)
-            self.tabs.setTabVisible(1,result.modes is not None)
-            self.tabs.setCurrentIndex(0)
-            self.apply_button.setEnabled(True);self.export_button.setEnabled(True)
-            self.save_comparison.setEnabled(True)
-            self.message.setText('PREVIEW ONLY — '+self.selection_description()+'. Click Apply to change the current result.')
-            return True
-        except Exception as exc:
-            self.message.setText(str(exc));return False
-        finally:QApplication.restoreOverrideCursor()
+            text='Enter the field inclination/declination for this survey and confirm them. Displayed defaults are not site estimates.'
+            self.message.setText(text);self.show_filter_error('Field Direction Not Confirmed',text,'direction');return False
+        error=None
+        # Long filters (VMD, spatial grids) block the window; say so in the status bar.
+        with busy(self,f'Running {self.method.currentText()} preview on {self.field.currentText()}... VMD and spatial-grid filters can take a while.'):
+            try:
+                if self.domain.currentText() == 'Spatial grid' and self.field.currentText() == 'Current result':
+                    history=session.filter_history
+                    if any(step['parameters'].get('field') in ('X','Y','Z') for step in history):
+                        raise ValueError('Choose Total magnitude for spatial transforms; the current result came from a phone component.')
+                frame=session.working if self.field.currentText()=='Current result' else session.cleaned
+                result=sf.run_filter(frame,self.field.currentText(),self.domain.currentText(),self.method.currentText(),**self.active_parameters())
+                result.settings['input_history']=json.loads(json.dumps(session.filter_history)) if self.field.currentText()=='Current result' else []
+                result.settings['cleaning']={'startup_samples':session.cleaning_key[0],'spatial_mad_multiplier':session.cleaning_key[1],'fallback_percentile':session.cleaning_key[2]}
+                result.settings['source_survey']=Path(session.path).name
+                self.vmd.table.setEnabled(True)
+                self.result=result;self.preview_revision=session.revision
+                self.draw_comparison()
+                if result.modes is not None:
+                    self.vmd.set_data(result.mode_axis,result.mode_signal,result.modes,result.metrics,result.selected,result.axis_label)
+                self.tabs.setTabVisible(1,result.modes is not None)
+                self.tabs.setCurrentIndex(0)
+                self.apply_button.setEnabled(True);self.export_button.setEnabled(True)
+                self.save_comparison.setEnabled(True)
+                self.message.setText('PREVIEW ONLY — '+self.selection_description()+'. Click Apply to change the current result.')
+                show_status(self,'Filter preview ready: '+self.method.currentText()+'. Review it, then click "Use result as current field" to apply.',8000)
+                return True
+            except sf.FilterSettingError as exc:error=('Invalid Filter Setting',exc,exc.setting)
+            except Exception as exc:error=('Filter Could Not Run',exc,None)
+        # Report after the busy cursor is restored so the dialog gets a normal pointer.
+        title,exc,setting=error
+        self.message.setText(str(exc));show_status(self,'Filter preview failed: '+str(exc))
+        self.show_filter_error(title,str(exc),setting)
+        return False
+
+    SETTING_CONTROLS={'window':('window_length','Window (samples)'),'low':('low','Lower / high-pass'),'high':('high','Upper / low-pass'),
+                      'k_modes':('k','Number of modes'),'alpha':('alpha','Penalty \u03b1'),'cell_size':('cell','Grid spacing'),
+                      'height':('height','Continuation height'),'max_gain':('gain','Inverse gain cap'),
+                      'inclination':('inc','Field inclination'),'direction':('direction_confirm','Field direction')}
+
+    def show_filter_error(self,title,text,setting=None):
+        """Pop up a filter error; for a bad setting, name it and put the cursor in it."""
+        control,label=None,None
+        if setting in self.SETTING_CONTROLS:
+            name,label=self.SETTING_CONTROLS[setting];control=getattr(self,name)
+        detail=f'Adjust "{label}" and click Preview filter again.' if label else 'Check the selected signal, filter, and survey, then preview again.'
+        # macOS hides dialog titles, so the title is also the bold heading inside the box.
+        box=QMessageBox(QMessageBox.Icon.Warning,title,title,QMessageBox.StandardButton.Ok,self)
+        box.setInformativeText(text+'\n\n'+detail);box.exec()
+        if control is not None:
+            control.setFocus()
+            if hasattr(control,'selectAll'):control.selectAll()
 
     def reconstruct(self,selected):
         if self.result is None:return
-        self.result.select_modes(selected);self.draw_comparison()
+        with busy(self,'Reconstructing the filtered signal from the selected VMD modes...'):
+            self.result.select_modes(selected);self.draw_comparison()
+        show_status(self,'Reconstruction ready. Apply to use it as the current field.',6000)
         self.message.setText('Manual retained modes: '+', '.join(map(str,selected))+'. Apply to use this reconstruction.')
         self.apply_button.setEnabled(True)
 
@@ -279,7 +304,9 @@ class FilterWorkspace(QWidget):
         # Keep the measured components intact; selected-axis results get their own scalar field.
         frame['Filtered_Field_uT']=r.after
         frame['BT']=r.after
-        self.commit(frame,r.settings)
+        # commit() redraws the maps and may rerun the analysis; it posts its own completion message.
+        with busy(self,'Applying filter result... updating maps and analysis.'):
+            self.commit(frame,r.settings)
         self.preview_revision=None
         self.vmd.table.setEnabled(False)
         self.apply_button.setEnabled(False)
@@ -289,7 +316,8 @@ class FilterWorkspace(QWidget):
         return True
 
     def reset(self):
-        self.reset_callback();self.session_changed()
+        with busy(self,'Restoring the cleaned baseline... updating maps and analysis.'):
+            self.reset_callback();self.session_changed()
 
     def export(self):
         if self.result is None:return

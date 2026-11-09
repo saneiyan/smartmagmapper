@@ -130,7 +130,6 @@ class CustomDialog(QDialog):
         self.TotalTime = QComboBox()
         self.TotalTime.setPlaceholderText('Select Time (sec)')
         self.MagTime = QComboBox()
-        self.LocTime = QComboBox()
         self.MagTime.setPlaceholderText('Select Magnetic Time (sec)')
         self.LocTime = QComboBox()
         self.LocTime.setPlaceholderText('Select GPS Time (sec)')

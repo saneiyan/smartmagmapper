@@ -11,7 +11,7 @@ Important files:
 - `GUI.py` - main desktop application.
 - `OrphanWellPipeline.py` - orphan-well processing workflow.
 - `GeoXAIInterpreter.py` - explanation layer for candidate estimates.
-- `DialogWindow.py`, `ExcelReader.py`, `MapFilter.py`, `MapMaker.py`, `PlotData.py`, `TableModel.py`, `WebMap.py` - original MagPy support modules.
+- `DialogWindow.py`, `ExcelReader.py`, `MapFilter.py`, `MapMaker.py`, `TableModel.py`, `WebMap.py` - original MagPy support modules.
 - `requirements.txt` - Python packages needed to run the app.
 
 
