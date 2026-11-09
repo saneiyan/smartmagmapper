@@ -1,7 +1,9 @@
 from PlotTheme import compact_toolbar
 """Synchronized observations and interactive, auditable cleaning comparison."""
 import numpy as np
-from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QLabel,QComboBox,QTabWidget,QGroupBox,QPushButton
+import math
+from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QLabel,QComboBox,QTabWidget,QGroupBox,QPushButton,QLineEdit
+from PyQt6.QtGui import QDoubleValidator
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 import OrphanWellPipeline as ow
@@ -12,41 +14,66 @@ class DataWorkspace(QWidget):
         root=QVBoxLayout(self)
         # The selected workspace tab supplies its heading.
         self.status=QLabel();self.status.setWordWrap(True);root.addWidget(self.status);self.status.hide()
-        self.controls=QGroupBox('Cleaning settings (live)')
+        self.controls=QGroupBox('Cleaning settings')
         self.controls.setMaximumWidth(310);self.controls.setMinimumWidth(265)
         self.form=QFormLayout(self.controls);self.form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         body=QHBoxLayout();root.addLayout(body,1)
         body.addWidget(self.controls,0)
         self.signal=QComboBox();self.signal.addItems(['Total magnitude','X','Y','Z'])
+        self.signal.currentIndexChanged.connect(self.update_scale_context)
         self.signal.currentIndexChanged.connect(self.draw)
         self.form.addRow('Display signal',self.signal)
+        # Per-column scale: follows the plot on screen (map signal or signal-plot tab);
+        # a column's map and signal plot share the same limits.
+        self.scale_widget=QWidget();scale_layout=QVBoxLayout(self.scale_widget);scale_layout.setContentsMargins(0,0,0,0)
+        box_row=QHBoxLayout();button_row=QHBoxLayout();scale_layout.addLayout(box_row);scale_layout.addLayout(button_row)
+        self.scale_min=QLineEdit();self.scale_max=QLineEdit()
+        for edit,name in [(self.scale_min,'Min'),(self.scale_max,'Max')]:
+            edit.setValidator(QDoubleValidator());edit.setPlaceholderText(name+' (auto)');edit.setClearButtonEnabled(True)
+            edit.setToolTip(name+'imum value for the plot currently shown (shared by its cleaning map and signal plot). Press Enter or click Apply.')
+            edit.returnPressed.connect(self.scale_edited);edit.textChanged.connect(self.scale_text_changed)
+            box_row.addWidget(edit,1)
+        self.scale_apply=QPushButton('Apply Scale');self.scale_apply.setObjectName('primaryButton');self.scale_apply.setEnabled(False)
+        self.scale_apply.setToolTip('Apply the min/max to the plot currently shown and its matching map or signal plot.')
+        self.scale_apply.clicked.connect(self.scale_edited);button_row.addWidget(self.scale_apply,1)
+        self.scale_auto=QPushButton('Auto');self.scale_auto.setToolTip('Fill the min/max with the full data range and apply it.')
+        self.scale_auto.clicked.connect(self.reset_scale);button_row.addWidget(self.scale_auto,1)
+        self.scales={};self.scale_column='BT'
+        self.scale_label=QLabel('Total field scale (\u00b5T)')
+        self.form.addRow(self.scale_label,self.scale_widget)
         self.tabs=QTabWidget();body.addWidget(self.tabs,1)
         self.figure=Figure(figsize=(12,7),constrained_layout=True);self.figure.set_constrained_layout_pads(w_pad=.04,h_pad=.07,hspace=.06,wspace=.05);self.canvas=FigureCanvas(self.figure)
         page=QWidget();plot_layout=QVBoxLayout(page);plot_layout.setContentsMargins(0,0,0,0)
         self.toolbar=NavigationToolbar2QT(self.canvas,page);toolbar=self.toolbar;compact_toolbar(toolbar)
         plot_layout.addWidget(toolbar);plot_layout.addWidget(self.canvas,1)
         self.map_page=page
-        self.map_style=QComboBox();self.map_style.addItems(['Point Map','Contour Map','Web Map'])
-        self.form.addRow('Map Display',self.map_style)
-        self.map_stage=QComboBox();self.map_stage.addItems(['Before Cleaning','After Cleaning']);self.map_stage.setCurrentIndex(1)
+        self.map_style=QComboBox();self.map_style.addItems(['Scatter Plot','Contour Plot','Web Map'])
+        self.map_stage=QComboBox();self.map_stage.addItems(['Raw Data (Before Cleaning)','Processed Data (After Cleaning)']);self.map_stage.setCurrentIndex(1)
         map_options=QHBoxLayout()
         map_options.addStretch(1)
         map_options.addWidget(QLabel('Cleaning Stage:'))
         self.map_stage.setMinimumWidth(210)
         map_options.addWidget(self.map_stage)
+        map_options.addSpacing(18)
+        map_options.addWidget(QLabel('Map Type:'))
+        self.map_style.setMinimumWidth(160)
+        map_options.addWidget(self.map_style)
         map_options.addStretch(1)
         plot_layout.insertLayout(0,map_options)
         self.map_stage.currentIndexChanged.connect(self.draw)
         self.map_style.currentIndexChanged.connect(self.draw)
         from PyQt6.QtWebEngineWidgets import QWebEngineView
-        self.web_comparison=QWebEngineView();plot_layout.addWidget(self.web_comparison,1);self.web_comparison.hide()
+        from PyQt6.QtWebEngineCore import QWebEngineSettings
+        self.web_comparison=QWebEngineView()
+        # Satellite tiles are remote; the map html is a local temp file.
+        self.web_comparison.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls,True)
+        plot_layout.addWidget(self.web_comparison,1);self.web_comparison.hide()
         self.tabs.addTab(page,'Cleaning Maps')
-        self.tables=QTabWidget();self.tables.addTab(window.data,'Cleaned Samples')
+        self.tables=QTabWidget();self.tables.addTab(window.data,'Processed Dataset (After Cleaning)')
         self.tabs.addTab(self.tables,'Data Tables')
         self.column_picker=QComboBox();self.column_picker.setMinimumWidth(240)
-        self.show_column=QPushButton('Show Plot');self.show_column.setEnabled(False)
-        signal_controls=QHBoxLayout();signal_controls.addWidget(QLabel('Signal Column:'));signal_controls.addWidget(self.column_picker,1);signal_controls.addWidget(self.show_column)
-        self.signal_source=QComboBox();self.signal_source.addItems(['Cleaned Samples','Before Cleaning'])
+        signal_controls=QHBoxLayout();signal_controls.addWidget(QLabel('Signal Column:'));signal_controls.addWidget(self.column_picker,1)
+        self.signal_source=QComboBox();self.signal_source.addItems(['Processed Data (After Cleaning)','Raw Data (Before Cleaning)'])
         self.signal_style=QComboBox();self.signal_style.addItems(['Line','Scatter'])
         signal_controls.addWidget(QLabel('Data:'));signal_controls.addWidget(self.signal_source)
         signal_controls.addWidget(QLabel('Display:'));signal_controls.addWidget(self.signal_style)
@@ -54,16 +81,105 @@ class DataWorkspace(QWidget):
         self.signal_style.currentIndexChanged.connect(self.redraw_signal_plots)
         window.plot_layout.insertLayout(0,signal_controls)
         self.column_picker.currentIndexChanged.connect(self.show_signal_column)
-        self.show_column.clicked.connect(self.show_signal_column)
         self.tabs.addTab(window.plot_widget,'Signal Plots')
         self.tabs.currentChanged.connect(self.update_context_controls)
         window.plot_tabs.currentChanged.connect(self.sync_signal_column)
+        window.plot_tabs.currentChanged.connect(self.update_scale_context)
         self.tabs.setTabToolTip(2,'Individual cleaned-data columns plotted against measurement time. Choose a numeric column using Signal Column in this view.')
         self.tabs.setTabToolTip(0,'Before cleaning shows synchronized observations before startup removal and position rejection. Colors represent magnetic field values.')
 
     def update_context_controls(self,*_):
         self.form.setRowVisible(self.signal,self.tabs.currentIndex()==0)
-        self.form.setRowVisible(self.map_style,self.tabs.currentIndex()==0)
+        # Scale applies to Cleaning Maps (0) and Signal Plots (2), not the data tables.
+        self.form.setRowVisible(self.scale_widget,self.tabs.currentIndex() in (0,2))
+        self.update_scale_context()
+
+    @property
+    def applied_scale(self):
+        return self.scales.get(self.scale_column,('',''))
+
+    @applied_scale.setter
+    def applied_scale(self,texts):
+        if self.scale_column is not None:self.scales[self.scale_column]=tuple(texts)
+
+    def map_column(self):
+        return 'BT' if self.signal.currentIndex()==0 else self.signal.currentText()+' (\u00b5T)'
+
+    @staticmethod
+    def scale_title(column):
+        if column is None:return 'Scale (no plot shown)'
+        return 'Total field scale (\u00b5T)' if column=='BT' else f'{column} scale'
+
+    def update_scale_context(self,*_):
+        """Point the scale boxes at the plot on screen and show its limits."""
+        index=self.tabs.currentIndex() if hasattr(self,'tabs') else 0
+        if index==0:column=self.map_column()
+        elif index==2:column=getattr(self.window.plot_tabs.currentWidget(),'signal_column',None)
+        else:return
+        self.scale_column=column
+        self.scale_label.setText(self.scale_title(column));self.scale_widget.setEnabled(column is not None)
+        for edit,text in zip((self.scale_min,self.scale_max),self.applied_scale):edit.blockSignals(True);edit.setText(text);edit.blockSignals(False)
+        if column is not None and '' in self.applied_scale:self.fill_auto_scale(only_empty=True)
+        self.scale_text_changed()
+
+    def field_scale(self,column=None):
+        """Applied limits for a column (default: the one shown) as (min, max); None means automatic."""
+        def value(text):
+            try:return float(text) if text else None
+            except ValueError:return None
+        # Only applied values count, so redraws never pick up half-typed entries.
+        texts=self.scales.get(self.scale_column if column is None else column,('',''))
+        lo,hi=value(texts[0]),value(texts[1])
+        if lo is not None and hi is not None and lo>=hi:return None,None
+        return lo,hi
+
+    def scale_text(self):
+        return (self.scale_min.text().strip(),self.scale_max.text().strip())
+
+    def scale_text_changed(self,*_):
+        # Apply is only available while the boxes differ from what is displayed.
+        self.scale_apply.setEnabled(self.scale_text()!=self.applied_scale)
+
+    def auto_field_scale(self,column=None):
+        """Full range of a column over the before/after cleaning data, rounded outward to 0.01."""
+        column=self.scale_column if column is None else column
+        session=self.window.active_session()
+        if session is None or column is None:return None
+        frames=[frame for frame in (self.raw,session.cleaned) if frame is not None and column in frame]
+        if not frames:return None
+        try:values=np.concatenate([frame[column].to_numpy(dtype=float) for frame in frames])
+        except (TypeError,ValueError):return None
+        if not np.isfinite(values).any():return None
+        return math.floor(np.nanmin(values)*100)/100,math.ceil(np.nanmax(values)*100)/100
+
+    def scale_edited(self,*_):
+        current=self.scale_text()
+        if current==self.applied_scale:return
+        self.applied_scale=current;self.scale_apply.setEnabled(False)
+        lo,hi=self.field_scale()
+        title=self.scale_title(self.scale_column)
+        if current[0] and current[1] and lo is None:
+            self.window.statusBar().showMessage(f'{title} ignored: minimum must be less than maximum.')
+        else:
+            self.window.statusBar().showMessage(f'{title}: {current[0] or "auto"} to {current[1] or "auto"}',6000)
+        self.draw();self.redraw_signal_plots()
+
+    def auto_scale_text(self):
+        auto=self.auto_field_scale()
+        return (f'{auto[0]:.2f}',f'{auto[1]:.2f}') if auto else ('','')
+
+    def fill_auto_scale(self,only_empty=False):
+        """Show the data range in the boxes and treat it as the applied scale (no redraw)."""
+        auto=self.auto_scale_text();applied=list(self.applied_scale)
+        for i,edit in enumerate((self.scale_min,self.scale_max)):
+            if only_empty and applied[i]:continue  # leave set limits (and any pending edit) alone
+            applied[i]=auto[i];edit.blockSignals(True);edit.setText(auto[i]);edit.blockSignals(False)
+        self.applied_scale=tuple(applied);self.scale_text_changed()
+
+    def reset_scale(self,*_):
+        texts=self.auto_scale_text()
+        for edit,text in zip((self.scale_min,self.scale_max),texts):edit.blockSignals(True);edit.setText(text);edit.blockSignals(False)
+        self.scale_edited()
 
     def sync_signal_column(self,*_):
         page=self.window.plot_tabs.currentWidget()
@@ -82,7 +198,6 @@ class DataWorkspace(QWidget):
                 self.column_picker.addItem('Total Magnitude' if column=='BT' else str(column),column)
         index=self.column_picker.findData(selected if selected in frame.columns else 'BT')
         self.column_picker.setCurrentIndex(max(0,index));self.column_picker.blockSignals(False)
-        self.show_column.setEnabled(self.column_picker.count()>0)
         current=self.column_picker.currentData()
         if current is not None and current!='BT':self.window.new_plot(name=current,df=frame,column=frame[current])
 
@@ -98,7 +213,7 @@ class DataWorkspace(QWidget):
         w.ow_startup_samples.setToolTip('Removes this many synchronized observations at the beginning of the survey.')
         w.ow_spatial_mad.setToolTip('Rejects positions beyond median radial distance + multiplier x radial MAD. Larger values retain more positions.')
         w.ow_fallback_percentile.setToolTip('Only used if radial MAD is zero. This is not a general magnetic amplitude percentile filter.')
-        self.raw_table=type(w.data)();self.tables.insertTab(0,self.raw_table,'Synchronized Before Cleaning')
+        self.raw_table=type(w.data)();self.tables.insertTab(0,self.raw_table,'Synchronized Dataset (Before Cleaning)')
         self.stream_tables=[]
         for title in ['Raw Magnetometer','Raw GPS']:
             table=type(w.data)();self.tables.addTab(table,title);self.stream_tables.append(table)
@@ -107,6 +222,15 @@ class DataWorkspace(QWidget):
         self.cleaning_details=QLabel('Import data to inspect cleaning.');self.cleaning_details.setWordWrap(True);self.form.addRow(self.cleaning_details)
         self.reset=QPushButton('Restore cleaning defaults')
         self.reset.clicked.connect(self.restore_defaults);self.form.addRow(self.reset)
+        self.update_cleaning=QPushButton('Update Cleaning Settings');self.update_cleaning.setObjectName('primaryButton')
+        self.update_cleaning.setToolTip('Re-clean the active survey with the settings above and rerun the analysis.')
+        self.update_cleaning.clicked.connect(w.apply_cleaning_settings);self.update_cleaning.setEnabled(False)
+        self.form.addRow(self.update_cleaning)
+
+    def set_cleaning_pending(self,pending):
+        if not hasattr(self,'update_cleaning'):return
+        self.update_cleaning.setEnabled(pending)
+        self.update_cleaning.setText('Update Cleaning Settings *' if pending else 'Update Cleaning Settings')
 
     def restore_defaults(self):
         self.window.ow_startup_samples.setValue(10)
@@ -121,6 +245,8 @@ class DataWorkspace(QWidget):
             self.raw_session=session
             self.set_table(self.raw_table,self.raw)
             for table,frame in zip(self.stream_tables,[session.magnetometer,session.location]):self.set_table(table,frame)
+            # A different survey has different ranges; every plot starts from its full range.
+            self.scales.clear();self.update_scale_context()
         a=session.audit
         self.status.hide()
         self.cleaning_details.setText(f"Spatial rule: {a['spatial_rule']}\nPosition cutoff: {a['spatial_limit_m']:.2f} m\nCleaning changes clear filters and comparison previews.")
@@ -147,6 +273,12 @@ class DataWorkspace(QWidget):
         import TableModel
         table.setModel(TableModel.TableModel(frame));table.setAlternatingRowColors(True)
 
+    def excluded_rows(self,frame):
+        """Rows of the before-cleaning data that cleaning removed (empty for any other frame)."""
+        session=self.window.active_session()
+        if session is None or frame is None or frame is not self.raw or 'Mag_Time (s)' not in frame:return frame.iloc[0:0] if frame is not None else None
+        return frame.loc[~frame['Mag_Time (s)'].isin(session.cleaned['Mag_Time (s)'])]
+
     def redraw_signal_plots(self,*_):
         session=self.window.active_session()
         if session is None:return
@@ -159,12 +291,20 @@ class DataWorkspace(QWidget):
     def draw(self,*_):
         session=self.window.active_session()
         if session is None or self.raw is None:return
-        col='BT' if self.signal.currentIndex()==0 else self.signal.currentText()+' (\u00b5T)'
+        col=self.map_column()
         if col not in session.cleaned:return
         values=np.concatenate([self.raw[col].to_numpy(),session.cleaned[col].to_numpy()])
         lo,hi=float(np.nanmin(values)),float(np.nanmax(values))
         if hi==lo:hi=lo+1e-9
-        removed=self.raw.loc[~self.raw['Mag_Time (s)'].isin(session.cleaned['Mag_Time (s)'])]
+        if col==self.scale_column:
+            # Boxes always show the limits in use; an empty applied box shows its automatic value.
+            if '' in self.applied_scale:self.fill_auto_scale(only_empty=True)
+            self.scale_min.setPlaceholderText(f'Min (auto {lo:.2f})');self.scale_max.setPlaceholderText(f'Max (auto {hi:.2f})')
+        user_lo,user_hi=self.field_scale(col)
+        new_lo=lo if user_lo is None else user_lo;new_hi=hi if user_hi is None else user_hi
+        if new_lo<new_hi:lo,hi=new_lo,new_hi
+        else:self.window.statusBar().showMessage(f'{self.scale_title(col)} ignored: the limit is outside the data range.')
+        removed=self.excluded_rows(self.raw)
         web=self.map_style.currentText()=='Web Map'
         self.canvas.setVisible(not web);self.toolbar.setVisible(not web);self.web_comparison.setVisible(web)
         if web:
@@ -176,46 +316,47 @@ class DataWorkspace(QWidget):
         origin=self.raw[['Easting (m)','Northing (m)']].mean()
         e=self.raw['Easting (m)']-origin.iloc[0];n=self.raw['Northing (m)']-origin.iloc[1]
         pad=max(float(np.ptp(e)),float(np.ptp(n)))*.06 or 1
-        stage=(self.raw,'Before Cleaning') if self.map_stage.currentIndex()==0 else (session.cleaned,'After Cleaning')
+        stage=(self.raw,'Raw Data (Before Cleaning)') if self.map_stage.currentIndex()==0 else (session.cleaned,'Processed Data (After Cleaning)')
+        # One shared norm keeps scatter, contour and web map colours identical.
+        from matplotlib.colors import Normalize
+        from matplotlib.cm import ScalarMappable
+        norm=Normalize(lo,hi)
         for ax,(frame,title) in zip(axes,[stage]):
             x=frame['Easting (m)']-origin.iloc[0];y=frame['Northing (m)']-origin.iloc[1]
-            if self.map_style.currentText()=='Contour Map' and len(np.unique(np.column_stack([x,y]),axis=0))>=3:
-                try:ax.tricontourf(x,y,frame[col],levels=np.linspace(lo,hi,25),cmap='viridis',vmin=lo,vmax=hi)
-                except (ValueError,RuntimeError):pass
-            im=ax.scatter(x,y,c=frame[col],cmap='viridis',vmin=lo,vmax=hi,s=9,zorder=2)
-            if title=='Before Cleaning' and len(removed):
+            if self.map_style.currentText()=='Contour Plot':
+                self.draw_contour(ax,x,y,frame[col],lo,hi)
+                ax.scatter(x,y,c='k',s=1.5,alpha=.35,linewidths=0,zorder=2,label='Samples')
+            else:
+                ax.scatter(x,y,c=frame[col],cmap='viridis',norm=norm,s=9,zorder=2)
+            # Check the stage by position, not title text, so renaming the stages can't hide the markers.
+            if self.map_stage.currentIndex()==0 and len(removed):
                 ax.scatter(removed['Easting (m)']-origin.iloc[0],removed['Northing (m)']-origin.iloc[1],marker='x',c='#b91c1c',s=28,label='Excluded',linewidths=1,zorder=3)
                 ax.legend(loc='best',fontsize=9)
             ax.set_title(f'{title} | {len(frame):,} Samples')
             ax.set_xlabel('Relative Easting (m)');ax.set_ylabel('Relative Northing (m)')
             ax.set_xlim(e.min()-pad,e.max()+pad);ax.set_ylim(n.min()-pad,n.max()+pad)
             ax.set_aspect('equal',adjustable='box');ax.grid(alpha=.15)
-        self.figure.colorbar(im,cax=color_axis,label=col+' (\u00b5T)' if col=='BT' else col)
+        self.figure.colorbar(ScalarMappable(norm=norm,cmap='viridis'),cax=color_axis,label=col+' (\u00b5T)' if col=='BT' else col)
         self.toolbar.update();self.canvas.draw_idle()
 
+    @staticmethod
+    def draw_contour(ax,x,y,z,lo,hi):
+        from MapMaker import MapMaker
+        keep=np.isfinite(np.asarray(z,dtype=float))
+        x,y,z=np.asarray(x,dtype=float)[keep],np.asarray(y,dtype=float)[keep],np.asarray(z,dtype=float)[keep]
+        if len(np.unique(np.column_stack([x,y]),axis=0))<3:return
+        try:MapMaker(None).tricontourf_clipped(x,y,z,ax=ax,levels=np.linspace(lo,hi,25),cmap='viridis',extend='both')
+        except (ValueError,RuntimeError):pass
+
     def draw_web_maps(self,cleaned,removed,col,lo,hi):
-        import folium,tempfile
-        from pathlib import Path
-        from branca.colormap import LinearColormap
+        import WebMap
         from PyQt6.QtCore import QUrl
-        lat=next(c for c in self.raw if c.startswith('Latitude'))
-        lon=next(c for c in self.raw if c.startswith('Longitude'))
-        maps=folium.Map(location=[float(self.raw[lat].median()),float(self.raw[lon].median())],zoom_start=18,tiles='OpenStreetMap')
-        frame=self.raw if self.map_stage.currentIndex()==0 else cleaned
-        title=self.map_stage.currentText()
         from matplotlib import colormaps
         from matplotlib.colors import to_hex
-        cmap=LinearColormap([to_hex(colormaps['viridis'](v)) for v in np.linspace(0,1,16)],vmin=lo,vmax=hi,caption=col+' (microtesla)')
-        layer=folium.FeatureGroup(name=title+' | '+str(len(frame))+' Samples')
-        for _,row in frame.iterrows():
-            color=cmap(float(row[col]))
-            folium.CircleMarker([row[lat],row[lon]],radius=3,color=color,fill=True,fill_color=color,fill_opacity=.9,weight=0,tooltip=f"Time: {row['Mag_Time (s)']:.3f} s; {col}: {row[col]:.3f}").add_to(layer)
-        layer.add_to(maps)
-        if self.map_stage.currentIndex()==0 and len(removed):
-            excluded=folium.FeatureGroup(name='Excluded Positions')
-            for _,row in removed.iterrows():folium.CircleMarker([row[lat],row[lon]],radius=5,color='#b91c1c',weight=2,fill=False).add_to(excluded)
-            excluded.add_to(maps)
-        cmap.add_to(maps);folium.LayerControl(collapsed=False).add_to(maps)
-        maps.fit_bounds([[float(self.raw[lat].min()),float(self.raw[lon].min())],[float(self.raw[lat].max()),float(self.raw[lon].max())]])
-        path=Path(tempfile.gettempdir())/f'smartmagmapper_cleaning_{id(self)}.html'
-        maps.save(str(path));self.web_comparison.load(QUrl.fromLocalFile(str(path)))
+        before=self.map_stage.currentIndex()==0
+        frame=self.raw if before else cleaned
+        # Same viridis ramp and limits as the scatter/contour colour bar.
+        colors=[to_hex(colormaps['viridis'](v)) for v in np.linspace(0,1,16)]
+        path=WebMap.build_map(frame,value_column=col,caption=(col+' (\u00b5T)' if col=='BT' else col),vmin=lo,vmax=hi,colors=colors,
+                              excluded=removed if before else None,layer_name=f'{self.map_stage.currentText()} | {len(frame):,} Samples')
+        self.web_comparison.load(QUrl.fromLocalFile(path))

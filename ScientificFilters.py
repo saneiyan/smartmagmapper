@@ -13,6 +13,13 @@ SERIES_FILTERS = ['VMD', 'Savitzky–Golay', 'Moving average', 'Low-pass', 'High
 SPATIAL_FILTERS = ['Upward continuation', 'Regularized downward continuation', 'Reduction to pole']
 
 
+class FilterSettingError(ValueError):
+    """A filter setting is outside the range this survey supports; `setting` names the parameter."""
+    def __init__(self, message, setting=None):
+        super().__init__(message)
+        self.setting = setting
+
+
 @dataclass
 class FilterResult:
     before: np.ndarray
@@ -96,10 +103,14 @@ def run_filter(frame, field='Total magnitude', domain='Time', method='VMD', **pa
             raise ValueError('Install vmdpy to run a genuine VMD decomposition.')
         k = int(params.get('k_modes', 10))
         if not 2 <= k <= 20 or len(values) < k*4:
-            raise ValueError('VMD needs 2–20 modes and at least four samples per mode.')
+            raise FilterSettingError(f'Number of modes is {k}, but VMD needs 2–20 modes and at least four samples per mode. '
+                                     f'This series has {len(values)} samples, so use at most {min(20, len(values)//4)} modes.', 'k_modes')
         work = pd.DataFrame({'Time (s)': uniform, 'Easting (m)': uniform,
                              'Northing (m)': np.zeros(len(uniform)), 'Signal': values})
-        config = ow.OrphanWellParams(vmd_modes=k, vmd_alpha=float(params.get('alpha', 2000)))
+        alpha = float(params.get('alpha', 2000))
+        if alpha <= 0:
+            raise FilterSettingError(f'Penalty α is {alpha:g}, but it must be greater than 0.', 'alpha')
+        config = ow.OrphanWellParams(vmd_modes=k, vmd_alpha=alpha)
         result.modes, result.metrics, result.selected = ow.run_vmd_modes(work, config, field_column='Signal')
         result.mode_axis, result.mode_signal = uniform, values
         result.select_modes(result.selected)
@@ -108,7 +119,10 @@ def run_filter(frame, field='Total magnitude', domain='Time', method='VMD', **pa
     if method in ('Moving average', 'Savitzky–Golay'):
         window = int(params.get('window', 11))
         if window < 3 or window % 2 == 0 or window > len(values):
-            raise ValueError('Window length must be odd, at least 3, and no longer than the processing series.')
+            largest = len(values) if len(values) % 2 else len(values)-1
+            nearest = f' The nearest valid windows are {window-1} and {window+1}.' if window % 2 == 0 and 3 <= window < largest else ''
+            raise FilterSettingError(f'Window (samples) is {window}, but {method} needs an odd window from 3 to {largest} '
+                                     f'(the processing series has {len(values)} samples).' + nearest, 'window')
         if method == 'Moving average':
             out = np.convolve(np.pad(values, (window//2, window//2), mode='edge'), np.ones(window)/window, mode='valid')
         else:
@@ -120,13 +134,19 @@ def run_filter(frame, field='Total magnitude', domain='Time', method='VMD', **pa
     else:
         low, high = float(params.get('low', .05)), float(params.get('high', .5))
         nyquist = .5/dx
+        unit = 'Hz' if domain == 'Time' else 'cycles/m'
+        def check_cutoff(value, label, setting):
+            if not 0 < value < nyquist:
+                raise FilterSettingError(f'{label} cutoff is {value:g} {unit}, but it must be above 0 and below the Nyquist limit '
+                                         f'of {nyquist:.4g} {unit} for this survey\'s sampling. Choose a value between 0 and {nyquist:.4g}.', setting)
         cutoff = high if method == 'Low-pass' else low
         if method == 'Band-pass':
-            if not 0 < low < high < nyquist:
-                raise ValueError(f'Use 0 < lower < upper < Nyquist ({nyquist:.4g}).')
+            check_cutoff(low, 'Lower / high-pass', 'low');check_cutoff(high, 'Upper / low-pass', 'high')
+            if low >= high:
+                raise FilterSettingError(f'Lower cutoff ({low:g} {unit}) must be less than the upper cutoff ({high:g} {unit}).', 'low')
             cutoff = [low, high]
-        elif not 0 < cutoff < nyquist:
-            raise ValueError(f'Cutoff must be between zero and Nyquist ({nyquist:.4g}).')
+        else:
+            check_cutoff(cutoff, 'Upper / low-pass' if method == 'Low-pass' else 'Lower / high-pass', 'high' if method == 'Low-pass' else 'low')
         sos = sp.butter(4, cutoff, btype={'Low-pass':'lowpass','High-pass':'highpass','Band-pass':'bandpass'}[method], fs=1/dx, output='sos')
         try:
             out = sp.sosfiltfilt(sos, values)
@@ -149,10 +169,13 @@ def _spatial(frame, values, method, params, field):
         raise ValueError('Spatial filtering needs two-dimensional survey coverage, not a single line.')
     cell = float(params.get('cell_size', 2.0))
     if cell <= 0:
-        raise ValueError('Grid spacing must be positive metres.')
+        raise FilterSettingError('Grid spacing must be a positive number of metres.', 'cell_size')
     nx, ny = int(np.ceil(np.ptp(e)/cell))+1, int(np.ceil(np.ptp(n)/cell))+1
     if min(nx,ny)<4 or max(nx,ny)>512:
-        raise ValueError('Choose grid spacing giving 4–512 cells per direction.')
+        smallest, largest = max(np.ptp(e), np.ptp(n))/511*1.01, min(np.ptp(e), np.ptp(n))/3*.99
+        advice = (f'For this survey choose a spacing between {smallest:.3g} and {largest:.3g} m.' if smallest < largest
+                  else 'No single spacing fits this survey\'s extent; the survey is too elongated for a spatial grid.')
+        raise FilterSettingError(f'Grid spacing of {cell:g} m gives {nx} × {ny} cells, but each direction needs 4–512 cells. ' + advice, 'cell_size')
     gx, gy = np.linspace(e.min(),e.max(),nx), np.linspace(n.min(),n.max(),ny)
     xx, yy = np.meshgrid(gx,gy)
     grid = griddata(xy, values, (xx,yy), method='linear')
@@ -165,11 +188,12 @@ def _spatial(frame, values, method, params, field):
     baseline = float(np.median(values))
     padded = np.pad(grid-baseline,pad,mode='reflect')
     if method == 'Reduction to pole':
-        import harmonica as hm
-        import xarray as xr
         inc, dec = float(params.get('inclination',60)),float(params.get('declination',0))
         if abs(inc)<15:
-            raise ValueError('RTP is unstable near the magnetic equator; this workflow requires |inclination| >= 15°.')
+            raise FilterSettingError(f'Field inclination is {inc:g}°, but reduction to pole is unstable near the magnetic equator; '
+                                     'use an inclination of at least 15° or at most −15°.', 'inclination')
+        import harmonica as hm
+        import xarray as xr
         data = xr.DataArray(padded, dims=('northing','easting'), coords={
             'northing':gy[0]+np.arange(-pad,ny+pad)*dy,
             'easting':gx[0]+np.arange(-pad,nx+pad)*dx})
@@ -178,7 +202,7 @@ def _spatial(frame, values, method, params, field):
     else:
         height = float(params.get('height',5))
         if height < 0:
-            raise ValueError('Continuation height must be nonnegative metres.')
+            raise FilterSettingError(f'Continuation height is {height:g} m, but it must be zero or more metres.', 'height')
         ky = 2*np.pi*np.fft.fftfreq(padded.shape[0],d=dy)[:,None]
         kx = 2*np.pi*np.fft.fftfreq(padded.shape[1],d=dx)[None,:]
         exponent = height*np.hypot(kx,ky)
@@ -187,7 +211,7 @@ def _spatial(frame, values, method, params, field):
         else:
             gain = float(params.get('max_gain',10))
             if gain<1 or gain>100:
-                raise ValueError('Downward-continuation gain cap must be between 1 and 100.')
+                raise FilterSettingError(f'Inverse gain cap is {gain:g}, but it must be between 1 and 100.', 'max_gain')
             # Bounded approximation; not an unconstrained inverse continuation.
             kernel = np.exp(np.minimum(exponent,np.log(gain)))
         filtered = np.fft.ifft2(np.fft.fft2(padded)*kernel).real

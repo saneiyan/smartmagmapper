@@ -10,12 +10,19 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 import ProjectIO
 import TableModel
 
+UNTITLED='Untitled survey project'
+
+def project_name_from_path(path):
+    """'site3.smmproj' or the backup 'site3.smmproj.bak2' -> 'site3'."""
+    name=Path(path).name
+    return name[:name.lower().index('.smmproj')] if '.smmproj' in name.lower() else Path(path).stem
+
 CONTROL_NAMES=['ow_startup_samples','ow_spatial_mad','ow_fallback_percentile','ow_window_length','ow_step_ratio','ow_gamma','ow_dbscan_eps','ow_min_samples']
 
 class ProjectTools(QObject):
     def __init__(self,window):
-        super().__init__(window);self.w=window;self.path=None;self.metadata={'id':str(uuid.uuid4()),'title':'Untitled survey project','author':'','notes':''}
-        self.dirty=False;self.loading=False;self.last_recovery=None;self.connected=set();self.view_hooks=weakref.WeakKeyDictionary();self.measure_points=[];self.measure_artists=[]
+        super().__init__(window);self.w=window;self.path=None;self.metadata={'id':str(uuid.uuid4()),'title':UNTITLED,'author':'','notes':''}
+        self.recovered=False;self.dirty=False;self.loading=False;self.project_active=False;self.last_recovery=None;self.connected=set();self.view_hooks=weakref.WeakKeyDictionary();self.measure_points=[];self.measure_artists=[]
         self.preferences=QSettings('SmartMagMapper','Desktop')
         self.precision=int(self.preferences.value('table_precision',4));self.grid=self.preferences.value('plot_grid',True,type=bool)
         self.auto_enabled=self.preferences.value('autosave',True,type=bool);self.interval=int(self.preferences.value('autosave_minutes',2))
@@ -37,24 +44,23 @@ class ProjectTools(QObject):
         menu.addAction(action);return action
 
     def build_menus(self):
-        w=self.w;existing=list(w.file_menu.actions())
-        for item in existing:w.file_menu.removeAction(item)
+        w=self.w;w.menu=w.menuBar();w.file_menu=w.menu.addMenu('File')
         self.action(w.file_menu,'New Project',self.new_project,'Ctrl+N')
         self.action(w.file_menu,'Open Project...',self.open_project,'Ctrl+O')
+        self.action(w.file_menu,'Recover Project...',self.recover)
+        w.file_menu.addSeparator()
         self.save_action=self.action(w.file_menu,'Save Project',self.save_project,'Ctrl+S')
         self.action(w.file_menu,'Save Project As...',lambda:self.save_project(save_as=True),'Ctrl+Shift+S')
         w.file_menu.addSeparator()
-        self.action(w.file_menu,'Project Properties...',self.properties)
-        self.action(w.file_menu,'Project Backups...',self.backups)
-        self.action(w.file_menu,'Recover Project...',self.recover)
+        self.import_action=self.action(w.file_menu,'Import Data...',w.import_data_action,'Ctrl+Shift+I')
+        self.data_export=self.action(w.file_menu,'Export Cleaned Survey...',w.export_dialog)
         w.file_menu.addSeparator()
-        self.data_export=None;self.filter_export=None;self.analysis_export=None
-        for action in existing:
-            if action.text()=='Export Data':action.setText('Export Cleaned Survey...');self.data_export=action
-            elif action.text()=='Export filter comparison / modes':action.setText('Export Current Filter Preview...');self.filter_export=action
-            elif action.text()=='Export anomaly results':action.setText('Export Analysis Results...');self.analysis_export=action
-            w.file_menu.addAction(action)
+        self.filter_export=self.action(w.file_menu,'Export Current Filter Preview...',lambda:w.filters_workspace.export())
+        self.analysis_export=self.action(w.file_menu,'Export Analysis Results...',w.export_orphan_results)
         w.file_menu.aboutToShow.connect(self.update_actions)
+        w.file_menu.addSeparator()
+        self.properties_action=self.action(w.file_menu,'Current Project Properties...',self.properties)
+        self.backups_action=self.action(w.file_menu,'Curent Project Backups...',self.backups)
         edit=w.menu.addMenu('Edit')
         self.undo_action=self.action(edit,'Undo Applied Filter',lambda:self.history(False),'Ctrl+Z')
         self.redo_action=self.action(edit,'Redo Applied Filter',lambda:self.history(True),'Ctrl+Shift+Z')
@@ -75,6 +81,8 @@ class ProjectTools(QObject):
 
     def update_actions(self,*_):
         session=self.w.active_session()
+        # Project-level actions stay disabled until New Project or Open Project succeeds.
+        for action in [self.import_action,self.properties_action,self.backups_action]:action.setEnabled(self.project_active)
         self.undo_action.setEnabled(session is not None and bool(session.undo_states))
         self.redo_action.setEnabled(session is not None and bool(session.redo_states))
         self.recalculate_action.setEnabled(session is not None)
@@ -86,8 +94,9 @@ class ProjectTools(QObject):
         if not eligible:
             if self.measure_action.isChecked():self.measure_action.setChecked(False);self.enable_measure(False)
             self.measure_points=[]
-        title=self.metadata['title']+(' *' if self.dirty else '')
-        self.w.setWindowTitle('SmartMagMapper | Project Workspace | '+title)
+        # Recovered/backup snapshots are flagged until they are saved as a project file.
+        title=self.metadata['title']+(' (recovered)' if self.recovered else '')+(' *' if self.dirty else '')
+        self.w.setWindowTitle('SmartMagMapper | Project Workspace'+(' | '+title if self.project_active else ''))
 
     def state(self):
         w=self.w
@@ -106,14 +115,20 @@ class ProjectTools(QObject):
     def save_project(self,checked=False,save_as=False):
         path=self.path
         if save_as or path is None:
-            selected,_=QFileDialog.getSaveFileName(self.w,'Save Survey Project',str(path or Path.home()/'survey.smmproj'),'SmartMagMapper project (*.smmproj)')
+            suggested=''.join('_' if c in '\\/:*?"<>|' else c for c in self.metadata['title']).strip() if self.metadata['title']!=UNTITLED else 'survey'
+            selected,_=QFileDialog.getSaveFileName(self.w,'Save Survey Project',str(path or Path.home()/(suggested+'.smmproj')),'SmartMagMapper project (*.smmproj)')
             if not selected:return False
             path=Path(selected)
             if path.suffix.lower()!='.smmproj':path=path.with_suffix('.smmproj')
+        previous_title=self.metadata['title']
+        # The title follows the file name (first save and Save As) unless the user set a
+        # custom title in Project Properties, i.e. one that differs from the current file name.
+        current_name=project_name_from_path(self.path) if self.path else None
+        if previous_title in (UNTITLED,current_name):self.metadata['title']=project_name_from_path(path)
         try:
-            self.save_to(path);self.path=Path(path);self.dirty=False;self.last_recovery=None;self.update_actions()
+            self.save_to(path);self.path=Path(path);self.dirty=False;self.recovered=False;self.last_recovery=None;self.update_actions()
             self.w.statusBar().showMessage('Project saved: '+self.path.name);return True
-        except Exception as exc:QMessageBox.warning(self.w,'Project Save',str(exc));return False
+        except Exception as exc:self.metadata['title']=previous_title;QMessageBox.warning(self.w,'Project Save',str(exc));return False
 
     def confirm_replace(self):
         if not self.dirty:return True
@@ -133,7 +148,7 @@ class ProjectTools(QObject):
         w.select_file.blockSignals(True);w.select_file.clear();w.select_file.blockSignals(False)
         w.sessions=[];w.df_list=[];w.processed_dfs={};w.dialog_configs={};w.mag_gps_dfs={};w.active_dataset_index=None
         w.current_df=w.df=w.ow_selected_dataset=None;w.ow_file_path=None;w.ow_selected_dataset_index=None;w.active_filters=[]
-        w.plot_tabs.clear();w.data_workspace.raw=None;w.data_workspace.raw_session=None;w.data_workspace.column_picker.clear();w.data_workspace.show_column.setEnabled(False)
+        w.plot_tabs.clear();w.data_workspace.raw=None;w.data_workspace.raw_session=None;w.data_workspace.column_picker.clear()
         for table in [w.data,w.data_workspace.raw_table,*w.data_workspace.stream_tables]:table.setModel(None)
         for figure,canvas in [(w.figure,w.canvas),(w.data_workspace.figure,w.data_workspace.canvas)]:figure.clear();canvas.draw_idle()
         w.filters_workspace.session_changed();w.clear_orphan_results('No survey loaded.');w.data_workspace.status.hide();w.data_workspace.cleaning_details.setText('Import a survey to inspect cleaning.')
@@ -154,7 +169,7 @@ class ProjectTools(QObject):
         self.loading=True
         try:
             self.reset_workspace();self.set_parameters(dict(zip(CONTROL_NAMES,[10,6.,95.,5.,.25,2.,4.,5])))
-            self.path=None;self.metadata={'id':str(uuid.uuid4()),'title':'Untitled survey project','author':'','notes':''};self.dirty=False;self.last_recovery=None
+            self.path=None;self.metadata={'id':str(uuid.uuid4()),'title':UNTITLED,'author':'','notes':''};self.recovered=False;self.dirty=False;self.last_recovery=None;self.project_active=True
         finally:self.loading=False;self.update_actions()
         return True
 
@@ -190,7 +205,12 @@ class ProjectTools(QObject):
             index=picker.findData(signal)
             if index>=0:picker.setCurrentIndex(index)
             w.tabs.setCurrentIndex(manifest['settings'].get('main_tab',0))
-            self.metadata=manifest['metadata'];self.path=None if recovery else Path(path);self.dirty=recovery;self.last_recovery=None
+            self.metadata=manifest['metadata'];self.recovered=recovery
+            # Projects saved without a title are shown by their file name (recovery files have no meaningful name).
+            if not self.metadata.get('title','').strip() or self.metadata['title']==UNTITLED:
+                stored=project_name_from_path(path)
+                self.metadata['title']=UNTITLED if stored.startswith('recovery-') else stored
+            self.path=None if recovery else Path(path);self.dirty=recovery;self.last_recovery=None;self.project_active=True
             self.w.statusBar().showMessage('Recovery opened; use Save Project As to retain it.' if recovery else 'Project opened: '+Path(path).name)
         finally:self.loading=False;self.update_actions();self.connect_canvases()
         return True
@@ -224,7 +244,7 @@ class ProjectTools(QObject):
         form.addRow('Surveys',QLabel(str(len(self.w.sessions))))
         form.addRow('Coordinate System',QLabel('UTM EPSG '+str(int(session.cleaned['UTM_EPSG'].iloc[0])) if session is not None else 'Determined when a survey is imported'))
         layout.addLayout(form);buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel);buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);layout.addWidget(buttons)
-        if dialog.exec():self.metadata.update(title=title.text().strip() or 'Untitled survey project',author=author.text(),notes=notes.toPlainText());self.changed()
+        if dialog.exec():self.metadata.update(title=title.text().strip() or UNTITLED,author=author.text(),notes=notes.toPlainText());self.changed()
 
     def backups(self):
         paths=[Path(str(self.path)+f'.bak{i}') for i in range(1,4)] if self.path else []

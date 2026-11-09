@@ -38,6 +38,69 @@ CONTROL_BACKGROUND_CSS = '''
 </style>
 '''
 
+def build_map(df, value_column='BT', caption='BT (µT)', vmin=None, vmax=None, colors=None,
+              excluded=None, excluded_name='Excluded Positions', layer_name='Points', zoom=18):
+    '''Builds the satellite web map and saves it to a temporary html file.
+
+    Parameters:
+    ----------
+        df (DataFrame): Survey points with 'Latitude (°)', 'Longitude (°)' and value_column.
+        value_column (str, optional): Column used to colour the points. Defaults to 'BT'.
+        caption (str, optional): Colour scale caption.
+        vmin, vmax (float, optional): Colour scale limits, 2nd/98th percentile when not given.
+        colors (list, optional): Colour ramp; defaults to blue, green, yellow.
+        excluded (DataFrame, optional): Points drawn as red outlined markers on their own layer.
+
+    Returns:
+    -------
+        str: Path of the saved html file.
+    '''
+    x = df['Longitude (°)']
+    y = df['Latitude (°)']
+    bt = df[value_column]
+    colormap = color_map(bt, vmin, vmax, colors)
+    #create the map, control_scale adds the distance scale bar in the bottom left
+    m = folium.Map(location=[y.mean(), x.mean()], zoom_start=zoom, prefer_canvas=True, tiles=None, control_scale=True)
+    #adding satellite imagery tile
+    folium.TileLayer(
+        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+        attr='Google',
+        max_zoom=25,
+        name='Google Satellite').add_to(m)
+    #adding circle markers for each data point in the imported dataframe
+    fg = folium.FeatureGroup(name=layer_name)
+    for lat, lon, val in zip(y, x, bt):
+        if np.isnan(val):
+            continue
+        folium.CircleMarker([lat, lon], color='black', fill=True, fill_color=colormap(val), fill_opacity=1, radius=2, weight=1).add_to(fg)
+    m.add_child(fg)
+    #optional layer of rejected points (e.g. positions removed during cleaning)
+    if excluded is not None and len(excluded):
+        ex = folium.FeatureGroup(name=excluded_name)
+        for lat, lon in zip(excluded['Latitude (°)'], excluded['Longitude (°)']):
+            folium.CircleMarker([lat, lon], radius=5, color='#b91c1c', weight=2, fill=False).add_to(ex)
+        m.add_child(ex)
+        folium.LayerControl(collapsed=False).add_to(m)
+    #value scale legend in the top right
+    colormap.caption = caption
+    colormap.add_to(m)
+    #north arrow below the zoom buttons
+    m.get_root().html.add_child(folium.Element(NORTH_ARROW_HTML))
+    m.get_root().header.add_child(folium.Element(CONTROL_BACKGROUND_CSS))
+    #creating temporary html file to allow for >2MB datasets
+    temp_map = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
+    temp_map.close()
+    m.save(temp_map.name)
+    return temp_map.name
+
+def color_map(bt, vmin=None, vmax=None, colors=None):
+    #use the regular map's scale when one was set, otherwise the same default range
+    lo = vmin if vmin is not None else np.nanpercentile(bt, 2)
+    hi = vmax if vmax is not None else np.nanpercentile(bt, 98)
+    if lo >= hi:
+        lo, hi = np.nanpercentile(bt, 2), np.nanpercentile(bt, 98)
+    return cm.LinearColormap(colors=colors or ['blue', 'green', 'yellow'], vmin=lo, vmax=hi)
+
 class MapWidget(QWebEngineView):
     def __init__(self, df, caption='BT (µT)', vmin=None, vmax=None):
         super().__init__()
@@ -46,63 +109,7 @@ class MapWidget(QWebEngineView):
         self.vmin = vmin
         self.vmax = vmax
         self.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
-
-        #loading data and assigning coordinate variables
-        x = self.df['Longitude (°)']
-        x_mean = x.mean()
-        y = self.df['Latitude (°)']
-        y_mean = y.mean()
         self.bt = self.df['BT']
-
         #loading the map onto the view
-        self.load_map(latitude=y_mean, longitude=x_mean, x=x, y=y, bt=self.bt)
-
-    def load_map(self, latitude, longitude, x, y, bt, zoom=18):
-        '''Loads the map onto the QWebEngineView widget.
-
-        Parameters:
-        ----------
-            latitude (float): The latitude of the center of the map.
-            longitude (float): The longitude of the center of the map.
-            x (array-like): The x-coordinates of the data points.
-            y (array-like): The y-coordinates of the data points.
-            zoom (int, optional): The zoom level of the map. Defaults to 18.
-
-        '''
-        colormap = self.color_map(bt)
-        #create the map, control_scale adds the distance scale bar in the bottom left
-        m = folium.Map(location=[latitude, longitude], zoom_start=zoom, prefer_canvas=True, tiles=None, control_scale=True)
-        #adding satellite imagery tile
-        folium.TileLayer(
-            tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-            attr='Google',
-            max_zoom=25,
-            name='Google Satellite').add_to(m)
-        #adding circle markers for each data point in the imported dataframe
-        val = list(bt)
-        data = list(zip(y, x, val))
-        fg = folium.FeatureGroup(name='Points')
-        for lat, lon, val in data:
-            folium.CircleMarker([lat, lon], color='black', fill=True, fill_color=colormap(val), fill_opacity=1, radius=2, weight=1).add_to(fg)
-        m.add_child(fg)
-        #value scale legend in the top right
-        colormap.caption = self.caption
-        colormap.add_to(m)
-        #north arrow below the zoom buttons
-        m.get_root().html.add_child(folium.Element(NORTH_ARROW_HTML))
-        m.get_root().header.add_child(folium.Element(CONTROL_BACKGROUND_CSS))
-        #creating temporary html file to allow for >2MB datasets
-        temp_map = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
-        m.save(temp_map.name)
-        #loading the temporary url
-        self.url = QtCore.QUrl.fromLocalFile(temp_map.name)
+        self.url = QtCore.QUrl.fromLocalFile(build_map(df, caption=caption, vmin=vmin, vmax=vmax))
         self.load(self.url)
-
-    def color_map(self, bt):
-        #use the regular map's scale when one was set, otherwise the same default range
-        vmin = self.vmin if self.vmin is not None else np.nanpercentile(bt, 2)
-        vmax = self.vmax if self.vmax is not None else np.nanpercentile(bt, 98)
-        if vmin >= vmax:
-            vmin, vmax = np.nanpercentile(bt, 2), np.nanpercentile(bt, 98)
-        colormap = cm.LinearColormap(colors = ['blue', 'green', 'yellow'], vmin=vmin, vmax=vmax)
-        return colormap
