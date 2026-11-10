@@ -1,20 +1,18 @@
-from PyQt6.QtCore import QSize, Qt, QTimer, QSortFilterProxyModel, QUrl
-from PyQt6.QtGui import QAction, QIcon, QKeySequence, QFont
-from PyQt6.QtWidgets import (QApplication, QCheckBox, QLabel, QMainWindow,
-                             QStatusBar, QToolBar, QWidget, QPushButton,
-                             QVBoxLayout, QHBoxLayout, QFileDialog, QTableWidget,
-                             QTableWidgetItem, QLineEdit, QMessageBox,
-                             QRadioButton, QComboBox, QTabWidget, QTableView,
-                             QHeaderView, QStackedLayout, QGroupBox,
+from PyQt6.QtCore import Qt, QTimer, QSortFilterProxyModel, QUrl
+from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import (QApplication, QLabel, QMainWindow,
+                             QStatusBar, QWidget, QPushButton,
+                             QVBoxLayout, QHBoxLayout, QFileDialog,
+                             QLineEdit, QMessageBox,
+                             QComboBox, QTabWidget, QTableView,
+                             QHeaderView, QGroupBox,
                              QFormLayout, QDoubleSpinBox, QSpinBox, QTextEdit,
-                             QSplitter, QScrollArea, QStyleFactory)
+                             QSplitter, QScrollArea)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 from matplotlib.figure import Figure
-import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import folium
 import branca.colormap as cm
 from pathlib import Path
@@ -32,7 +30,7 @@ import TableModel
 import OrphanWellPipeline as ow
 import GeoXAIInterpreter as gx
 from Busy import busy
-import sys, os, tempfile, json
+import sys, os, tempfile, json, threading, traceback
 
 #choices in the Map View dropdown
 POINT_MAP = 'Point Map'
@@ -53,8 +51,6 @@ IGRF_INCOMPATIBLE_FILTERS = ('Reduction to Pole', 'VMD')
 IGRF_SKIPPED_MESSAGE = 'IGRF residual not applied: RTP and VMD results already have the background removed. Use Fitted trend instead.'
 
 #%% General crash ERROR
-import threading
-import traceback
 
 def errorMessage(etype, value, tb):
     print('ERROR begin:')

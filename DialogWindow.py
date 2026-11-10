@@ -1,13 +1,13 @@
-from PyQt6 import QtCore
-from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QPushButton, QDialog,QDialogButtonBox,
                              QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                              QFileDialog, QCheckBox, QRadioButton, QComboBox,
-                             QButtonGroup, QGroupBox, QTableView, QHeaderView,
+                             QButtonGroup, QTableView, QHeaderView,
                              QMessageBox)
 from PyQt6.QtGui import QFont
+import os
 import TableModel
 import pandas as pd
+import OrphanWellPipeline as ow
 
 class CustomDialog(QDialog):
    def __init__(self, parent=None):
@@ -198,7 +198,6 @@ class CustomDialog(QDialog):
 
    def read_file(self):
         # read raw file and import the column headers into the drop-down menus
-        import os
         if not getattr(self, 'file_paths', None):
             return
 
@@ -256,7 +255,6 @@ class CustomDialog(QDialog):
 
 
    def suggest_columns(self):
-       import OrphanWellPipeline as ow
        def choose(combo, aliases):
            found = ow._find_column(self.raw_file, aliases, required=False)
            if found is not None:

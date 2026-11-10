@@ -1,3 +1,9 @@
+from pathlib import Path
+from matplotlib import get_data_path
+from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt,QSize
+
+
 def light_figure(figure):
     figure.set_facecolor('white')
     for ax in figure.axes:
@@ -20,10 +26,6 @@ def light_figure(figure):
 
 def compact_toolbar(toolbar):
     """Native, labelled navigation with clear active states and full click targets."""
-    from pathlib import Path
-    from matplotlib import get_data_path
-    from PyQt6.QtGui import QIcon
-    from PyQt6.QtCore import Qt,QSize
     toolbar.setMinimumHeight(40)
     toolbar.setMaximumHeight(48)
     toolbar.setIconSize(QSize(18,18))

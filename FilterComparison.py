@@ -1,6 +1,7 @@
 """Immutable filter previews compared on identical survey rows and input values."""
 from PlotTheme import compact_toolbar
 from ComparisonSpectrum import comparison_spectra
+from Busy import busy
 from copy import deepcopy
 import hashlib,json
 from pathlib import Path
@@ -181,7 +182,6 @@ class FilterComparison(QWidget):
         for key,control in [('window',self.lab.window_length),('low',self.lab.low),('high',self.lab.high),('k_modes',self.lab.k),('alpha',self.lab.alpha),('cell_size',self.lab.cell),('height',self.lab.height),('max_gain',self.lab.gain),('inclination',self.lab.inc),('declination',self.lab.dec)]:
             if key in r.settings:control.setValue(r.settings[key])
         if r.settings['method']=='Reduction to pole':self.lab.direction_confirm.setCurrentIndex(1)
-        from Busy import busy
         with busy(self,f'Loading saved result {self.slot.currentText()}...'):
             self.lab.result=r;self.lab.preview_revision=session.revision
             self.lab.draw_comparison()

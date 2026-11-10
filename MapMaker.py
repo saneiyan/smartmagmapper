@@ -1,19 +1,29 @@
 import pandas as pd
 import numpy as np
 
-import os
-import warnings
-from datetime import time, datetime
-
 import matplotlib.pyplot as plt
 import matplotlib.path as mpath
 import matplotlib.tri as mtri
-from scipy.stats import linregress
-from scipy.spatial.distance import cdist
-from scipy.interpolate import (griddata, NearestNDInterpolator,
-    splrep, splev, make_smoothing_spline)
+from scipy.interpolate import griddata
 from scipy.spatial import Delaunay
 from scipy.spatial import ConvexHull
+import pyproj
+
+# Optional packages (not in requirements.txt): the app still runs without them,
+# falling back or explaining what to install when a feature needs one.
+try:
+    from concave_hull import concave_hull_indexes
+except ImportError:
+    concave_hull_indexes = None
+try:
+    import rasterio
+    from rasterio.transform import from_origin
+except Exception:
+    rasterio = from_origin = None
+try:
+    from pykrige.ok import OrdinaryKriging
+except ImportError:
+    OrdinaryKriging = None
 
 class MapMaker:
     def __init__(self, fp):
@@ -67,9 +77,7 @@ class MapMaker:
         znew : array_like
             Z values with NaN outside of the concave hull
         """
-        try:
-            from concave_hull import concave_hull_indexes
-        except ImportError as e:
+        if concave_hull_indexes is None:
             print('concave-hull not installed, will use convexhull instead. Install it with `pip install concave-hull`')
             znew = self.clipConvexHull(xdata, ydata, x, y, z)
             return znew
@@ -123,9 +131,7 @@ class MapMaker:
         else:
             fig = ax.figure
 
-        try:
-            from concave_hull import concave_hull_indexes
-        except ImportError as e:
+        if concave_hull_indexes is None:
             print('concave-hull not installed, will use normal tricontourf instead. Install it with `pip install concave-hull`')
             cax = ax.tricontourf(x, y, z, **kwargs)
             return cax
@@ -184,7 +190,6 @@ class MapMaker:
             Target CRS, in EPSG number: e.g. `targetProjection='EPSG:3395'`
             for the British Grid. If None, only WGS84 decimal degree will be returned.
         """
-        import pyproj
 
         def NMEA(arg):
             """ Convert NMEA string to WGS84 (GPS) decimal degree.
@@ -387,10 +392,7 @@ class MapMaker:
             Target CRS, in EPSG number: e.g. `targetProjection='EPSG:4326'` Default DMS
         """
 
-        try:
-            import rasterio
-            from rasterio.transform import from_origin
-        except:
+        if rasterio is None:
             raise ImportError('rasterio is needed to save georeferenced .tif file. Install it with "pip install rasterio"')
 
         self.df = pd.read_csv(self.fp)
@@ -420,7 +422,8 @@ class MapMaker:
             z = self.idw(x, y, xknown, yknown, values)
             z = z.reshape(X.shape)
         elif method == 'kriging':
-            from pykrige.ok import OrdinaryKriging
+            if OrdinaryKriging is None:
+                raise ImportError('pykrige is needed for kriging interpolation. Install it with "pip install pykrige"')
             gridx = np.linspace(xmin, xmax, nx)
             gridy = np.linspace(ymin, ymax, ny)
             OK = OrdinaryKriging(xknown, yknown, values, variogram_model='linear',

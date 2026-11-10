@@ -5,6 +5,8 @@ import pandas as pd
 from scipy import signal as sp
 from scipy.interpolate import griddata, RegularGridInterpolator
 from scipy.ndimage import distance_transform_edt
+import harmonica as hm
+import xarray as xr
 import OrphanWellPipeline as ow
 
 SAVITZKY_POLYORDER = 2
@@ -192,8 +194,6 @@ def _spatial(frame, values, method, params, field):
         if abs(inc)<15:
             raise FilterSettingError(f'Field inclination is {inc:g}°, but reduction to pole is unstable near the magnetic equator; '
                                      'use an inclination of at least 15° or at most −15°.', 'inclination')
-        import harmonica as hm
-        import xarray as xr
         data = xr.DataArray(padded, dims=('northing','easting'), coords={
             'northing':gy[0]+np.arange(-pad,ny+pad)*dy,
             'easting':gx[0]+np.arange(-pad,nx+pad)*dx})

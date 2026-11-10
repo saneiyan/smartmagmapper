@@ -7,6 +7,7 @@ import ppigrf
 import datetime as dt
 import harmonica as hm
 import xarray as xr
+import OrphanWellPipeline as ow
 
 try:
     from vmdpy import VMD
@@ -47,7 +48,6 @@ class MapFilter:
         return 1.0
 
     def variational_mode_decomposition(self, k_modes=10, alpha=2000.0, max_modes=2):
-        import OrphanWellPipeline as ow
         if ow.VMD is None:
             raise ImportError('The vmdpy package is required for the VMD map filter.')
         out = self.df.copy(deep=True)

@@ -1,12 +1,22 @@
-from PlotTheme import compact_toolbar
 """Synchronized observations and interactive, auditable cleaning comparison."""
-import numpy as np
 import math
+import numpy as np
+from pandas.api.types import is_numeric_dtype
 from PyQt6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QLabel,QComboBox,QTabWidget,QGroupBox,QPushButton,QLineEdit
 from PyQt6.QtGui import QDoubleValidator
+from PyQt6.QtCore import QUrl
+from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebEngineCore import QWebEngineSettings
+from matplotlib import colormaps
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize, to_hex
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 import OrphanWellPipeline as ow
+import TableModel
+import WebMap
+from MapMaker import MapMaker
+from PlotTheme import compact_toolbar
 
 class DataWorkspace(QWidget):
     def __init__(self, window):
@@ -62,8 +72,6 @@ class DataWorkspace(QWidget):
         plot_layout.insertLayout(0,map_options)
         self.map_stage.currentIndexChanged.connect(self.draw)
         self.map_style.currentIndexChanged.connect(self.draw)
-        from PyQt6.QtWebEngineWidgets import QWebEngineView
-        from PyQt6.QtWebEngineCore import QWebEngineSettings
         self.web_comparison=QWebEngineView()
         # Satellite tiles are remote; the map html is a local temp file.
         self.web_comparison.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls,True)
@@ -189,7 +197,6 @@ class DataWorkspace(QWidget):
             self.column_picker.blockSignals(True);self.column_picker.setCurrentIndex(index);self.column_picker.blockSignals(False)
 
     def update_signal_columns(self, frame):
-        from pandas.api.types import is_numeric_dtype
         selected=self.column_picker.currentData()
         self.column_picker.blockSignals(True);self.column_picker.clear()
         excluded={'Time (s)','Mag_Time (s)','UTM_EPSG','easting','northing','Total_Field_uT'}
@@ -270,7 +277,6 @@ class DataWorkspace(QWidget):
 
     @staticmethod
     def set_table(table,frame):
-        import TableModel
         table.setModel(TableModel.TableModel(frame));table.setAlternatingRowColors(True)
 
     def excluded_rows(self,frame):
@@ -318,8 +324,6 @@ class DataWorkspace(QWidget):
         pad=max(float(np.ptp(e)),float(np.ptp(n)))*.06 or 1
         stage=(self.raw,'Raw Data (Before Cleaning)') if self.map_stage.currentIndex()==0 else (session.cleaned,'Processed Data (After Cleaning)')
         # One shared norm keeps scatter, contour and web map colours identical.
-        from matplotlib.colors import Normalize
-        from matplotlib.cm import ScalarMappable
         norm=Normalize(lo,hi)
         for ax,(frame,title) in zip(axes,[stage]):
             x=frame['Easting (m)']-origin.iloc[0];y=frame['Northing (m)']-origin.iloc[1]
@@ -341,7 +345,6 @@ class DataWorkspace(QWidget):
 
     @staticmethod
     def draw_contour(ax,x,y,z,lo,hi):
-        from MapMaker import MapMaker
         keep=np.isfinite(np.asarray(z,dtype=float))
         x,y,z=np.asarray(x,dtype=float)[keep],np.asarray(y,dtype=float)[keep],np.asarray(z,dtype=float)[keep]
         if len(np.unique(np.column_stack([x,y]),axis=0))<3:return
@@ -349,10 +352,6 @@ class DataWorkspace(QWidget):
         except (ValueError,RuntimeError):pass
 
     def draw_web_maps(self,cleaned,removed,col,lo,hi):
-        import WebMap
-        from PyQt6.QtCore import QUrl
-        from matplotlib import colormaps
-        from matplotlib.colors import to_hex
         before=self.map_stage.currentIndex()==0
         frame=self.raw if before else cleaned
         # Same viridis ramp and limits as the scatter/contour colour bar.

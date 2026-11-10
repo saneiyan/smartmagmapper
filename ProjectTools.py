@@ -1,12 +1,11 @@
 """Project lifecycle, filter history and application-wide settings in one menu layer."""
 from pathlib import Path
-from copy import deepcopy
 from datetime import datetime,timezone
-import uuid,weakref,math
+import uuid,weakref,math,zipfile,json
 from PyQt6.QtCore import QObject,QTimer,QSettings,QStandardPaths,QEvent,QSignalBlocker,Qt
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (QApplication,QDialog,QVBoxLayout,QHBoxLayout,QFormLayout,QLabel,QLineEdit,QTextEdit,QSpinBox,QCheckBox,QPushButton,QDialogButtonBox,QFileDialog,QMessageBox,QListWidget,QTableView)
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg,NavigationToolbar2QT
 import ProjectIO
 import TableModel
 
@@ -258,7 +257,6 @@ class ProjectTools(QObject):
         dialog=QDialog(self.w);dialog.setWindowTitle(title);layout=QVBoxLayout(dialog);items=QListWidget();layout.addWidget(items)
         for path in paths:
             try:
-                import zipfile,json
                 with zipfile.ZipFile(path) as archive:data=json.loads(archive.read('project.json'))
                 items.addItem(data['metadata']['title']+' | '+data['saved_utc']+' | '+path.name)
             except Exception:items.addItem(path.name)
@@ -345,7 +343,6 @@ class ProjectTools(QObject):
             for canvas in self.w.findChildren(FigureCanvasQTAgg):
                 if canvas.isVisible():canvas.draw_idle()
         if checked:
-            from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
             for toolbar in self.w.findChildren(NavigationToolbar2QT):
                 if toolbar.isVisible():
                     if str(toolbar.mode).startswith('pan'):toolbar.pan()
@@ -364,7 +361,6 @@ class ProjectTools(QObject):
 
     def reset_plot(self):
         # Reset the currently visible interactive figure, not hidden workspaces.
-        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
         for toolbar in self.w.findChildren(NavigationToolbar2QT):
             if toolbar.isVisible():toolbar.home();return
         for canvas in self.w.findChildren(FigureCanvasQTAgg):

@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QGroupBox,QLabel,
-    QComboBox,QSpinBox,QDoubleSpinBox,QPushButton,QTabWidget,QSplitter,QScrollArea,QFileDialog,QApplication,QMessageBox)
+    QComboBox,QSpinBox,QDoubleSpinBox,QPushButton,QTabWidget,QScrollArea,QFileDialog,QMessageBox)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import ScientificFilters as sf

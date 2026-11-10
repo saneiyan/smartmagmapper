@@ -1,9 +1,7 @@
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 import PyQt6.QtCore as QtCore
 import tempfile
-from PyQt6.QtCore import QUrl
 import folium
 import numpy as np
 import branca.colormap as cm
