@@ -377,13 +377,13 @@ def mode_metrics(modes: np.ndarray, raw: np.ndarray, dt: float) -> pd.DataFrame:
         rows.append(
             {
                 "mode": i,
-                "energy_ratio": float(np.nanvar(mode) / raw_var),
+                "variance_ratio": float(np.nanvar(mode) / raw_var),
                 "dominant_rate_hz": dominant_rate(mode, dt),
                 "spectral_flatness": spectral_flatness(mode),
             }
         )
     metrics = pd.DataFrame(rows)
-    er = metrics["energy_ratio"].to_numpy(dtype=float)
+    er = metrics["variance_ratio"].to_numpy(dtype=float)
     fr = metrics["dominant_rate_hz"].to_numpy(dtype=float)
     sf = metrics["spectral_flatness"].to_numpy(dtype=float)
     metrics["noise_like"] = (sf > np.nanpercentile(sf, 80)) & (er < np.nanmedian(er))
@@ -396,12 +396,12 @@ def select_modes(metrics: pd.DataFrame, max_modes: int = 2) -> list[int]:
     candidates = metrics[
         (~metrics["noise_like"]) & (~metrics["trend_like"]) & (~metrics["extreme_high_rate"])
     ].copy()
-    candidates = candidates[candidates["energy_ratio"] >= max(0.035, float(metrics["energy_ratio"].median()))]
+    candidates = candidates[candidates["variance_ratio"] >= max(0.035, float(metrics["variance_ratio"].median()))]
     if candidates.empty:
         candidates = metrics[~metrics["trend_like"]].copy()
     if candidates.empty:
         candidates = metrics.copy()
-    candidates["rank_score"] = candidates["energy_ratio"] * (1.0 - candidates["spectral_flatness"].clip(0, 0.95))
+    candidates["rank_score"] = candidates["variance_ratio"] * (1.0 - candidates["spectral_flatness"].clip(0, 0.95))
     selected = candidates.sort_values("rank_score", ascending=False).head(max_modes)["mode"].astype(int).tolist()
     return sorted(selected)
 
