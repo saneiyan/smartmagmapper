@@ -7,7 +7,8 @@ from scipy.interpolate import griddata, RegularGridInterpolator
 from scipy.ndimage import distance_transform_edt
 import harmonica as hm
 import xarray as xr
-import OrphanWellPipeline as ow
+from processing.labels import signal_label
+from processing import data_analysis_pipeline as dap
 
 SAVITZKY_POLYORDER = 2
 
@@ -51,12 +52,12 @@ class FilterResult:
 
 def field_values(frame, field):
     if field == 'Total magnitude':
-        return frame['Total_Field_uT'].to_numpy(dtype=float)
+        return frame['BT'].to_numpy(dtype=float)
     if field == 'Current result':
         return frame['BT'].to_numpy(dtype=float)
-    key = {'X': 'X (µT)', 'Y': 'Y (µT)', 'Z': 'Z (µT)'}.get(field)
+    key = field if field in ('X', 'Y', 'Z') else None
     if key is None or key not in frame:
-        raise ValueError(f'{field} is not available in this survey.')
+        raise ValueError(f'{signal_label(field)} is not available in this survey.')
     return frame[key].to_numpy(dtype=float)
 
 
@@ -101,7 +102,7 @@ def run_filter(frame, field='Total magnitude', domain='Time', method='VMD', **pa
     settings = dict(params, field=field, domain=domain, method=method, spacing=float(dx))
     result = FilterResult(before.copy(), before.copy(), axis, 'Time (s)' if domain == 'Time' else 'Path distance (m)', settings, notes)
     if method == 'VMD':
-        if ow.VMD is None:
+        if dap.VMD is None:
             raise ValueError('Install vmdpy to run a genuine VMD decomposition.')
         k = int(params.get('k_modes', 10))
         if not 2 <= k <= 20 or len(values) < k*4:
@@ -112,8 +113,8 @@ def run_filter(frame, field='Total magnitude', domain='Time', method='VMD', **pa
         alpha = float(params.get('alpha', 2000))
         if alpha <= 0:
             raise FilterSettingError(f'Penalty α is {alpha:g}, but it must be greater than 0.', 'alpha')
-        config = ow.OrphanWellParams(vmd_modes=k, vmd_alpha=alpha)
-        result.modes, result.metrics, result.selected = ow.run_vmd_modes(work, config, field_column='Signal')
+        config = dap.AnalysisParams(vmd_modes=k, vmd_alpha=alpha)
+        result.modes, result.metrics, result.selected = dap.run_vmd_modes(work, config, field_column='Signal')
         result.mode_axis, result.mode_signal = uniform, values
         result.select_modes(result.selected)
         result.notes.append('Automatic recommendations use rate, variance ratio, spectral flatness, and ranking. Excluded modes remain available.')

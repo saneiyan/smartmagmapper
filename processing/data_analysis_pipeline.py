@@ -10,10 +10,11 @@ import numpy as np
 import pandas as pd
 from pyproj import Transformer
 from sklearn.cluster import DBSCAN
+from processing import labels
 
 try:
     from vmdpy import VMD
-except Exception:  # pragma: no cover - fallback keeps the GUI importable.
+except Exception:
     VMD = None
 
 
@@ -41,10 +42,10 @@ def survey_epsg(df: pd.DataFrame) -> int:
 
 
 @dataclass
-class OrphanWellParams:
-    #optional coordinates of a known well, used only for display and offsets, never for candidate selection
-    well_lat: float | None = None
-    well_lon: float | None = None
+class AnalysisParams:
+    #optional coordinates of a known reference location (e.g. a known target), used only for display and offsets, never for candidate selection
+    reference_lat: float | None = None
+    reference_lon: float | None = None
     startup_samples: int = 10
     spatial_mad_multiplier: float = 6.0
     spatial_fallback_percentile: float = 95.0
@@ -61,26 +62,26 @@ class OrphanWellParams:
 
     @property
     def reference_known(self) -> bool:
-        return self.well_lat is not None and self.well_lon is not None
+        return self.reference_lat is not None and self.reference_lon is not None
 
 
-def well_utm(params: OrphanWellParams, epsg: int) -> tuple[float, float] | None:
-    """Known well position in the survey's UTM zone, or None if no well was entered."""
+def reference_utm(params: AnalysisParams, epsg: int) -> tuple[float, float] | None:
+    """Reference location in the survey's UTM zone, or None if none was entered."""
     if not params.reference_known:
         return None
-    east, north = _utm_transformers(epsg)[0].transform(params.well_lon, params.well_lat)
+    east, north = _utm_transformers(epsg)[0].transform(params.reference_lon, params.reference_lat)
     return float(east), float(north)
 
 
-def add_well_distance(df: pd.DataFrame, params: OrphanWellParams) -> pd.DataFrame:
-    """Add each point's distance to the entered reference well, if one was entered."""
-    well = well_utm(params, survey_epsg(df))
-    if well is None:
+def add_reference_distance(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
+    """Add each point's distance to the entered reference location, if one was entered."""
+    reference = reference_utm(params, survey_epsg(df))
+    if reference is None:
         return df
     out = df.copy()
-    out["Distance_to_Well_m"] = np.hypot(
-        out["Easting (m)"].to_numpy(dtype=float) - well[0],
-        out["Northing (m)"].to_numpy(dtype=float) - well[1],
+    out["Distance_to_Reference_m"] = np.hypot(
+        out["Easting (m)"].to_numpy(dtype=float) - reference[0],
+        out["Northing (m)"].to_numpy(dtype=float) - reference[1],
     )
     return out
 
@@ -120,9 +121,10 @@ def _find_column(df: pd.DataFrame, aliases: list[str], required: bool = True) ->
         key = _norm(alias)
         if key in normalized:
             return normalized[key]
+    fuzzy = [_norm(alias) for alias in aliases if len(_norm(alias)) >= 3]
     for col in df.columns:
         key = _norm(col)
-        if any(_norm(alias) in key or key in _norm(alias) for alias in aliases):
+        if len(key) >= 3 and any(alias in key or key in alias for alias in fuzzy):
             return col
     if required:
         raise ValueError(f"Missing required column. Tried aliases: {aliases}")
@@ -136,23 +138,35 @@ def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+_UNIT_TAGS = ["uT", "µT", "nT", "mT", "T", "G", "mG"]
+
+
 def _standardize_magnetometer(df: pd.DataFrame) -> pd.DataFrame:
+    """Magnetometer stream with unit-free columns Mag_Time (s) and X, Y, Z (or BT for scalar data).
+
+    Values are kept as recorded. The unit written in the source headers (e.g. 'X (nT)'), if any, is put in
+    out.attrs['field_unit'] (None when the headers give no unit).
+    """
     df = _flat_columns(df)
     time_col = _find_column(df, ["Mag_Time (s)", "Magnetometer_Time (s)", "Time (s)", "time"])
     components = [
-        _find_column(df, [f"{axis} (uT)", f"{axis} (µT)", f"Magnetic field {axis.lower()} (uT)",
-                          f"Magnetometer_{axis} (uT)", f"B{axis}"], required=False)
+        _find_column(df, [axis] + [f"{axis} ({unit})" for unit in _UNIT_TAGS]
+                     + [f"Magnetic field {axis.lower()} (uT)", f"Magnetometer_{axis} (uT)", f"B{axis}"], required=False)
         for axis in "XYZ"
     ]
     if all(col is not None for col in components):
+        source = components
         out = df[[time_col] + components].copy()
-        out.columns = ["Mag_Time (s)", "X (µT)", "Y (µT)", "Z (µT)"]
+        out.columns = ["Mag_Time (s)", "X", "Y", "Z"]
     else:
-        scalar = _find_column(df, ["BT", "Total_Field_uT", "Total magnetic field (uT)",
-                                   "Magnetic field (uT)", "B (uT)"])
+        scalar = _find_column(df, ["BT"] + [f"BT ({unit})" for unit in _UNIT_TAGS]
+                              + ["Total_Field_uT", "Total magnetic field (uT)", "Magnetic field (uT)", "B (uT)"])
+        source = [scalar]
         out = df[[time_col, scalar]].copy()
         out.columns = ["Mag_Time (s)", "BT"]
-    return _coerce_numeric(out).replace([np.inf, -np.inf], np.nan).dropna()
+    out = _coerce_numeric(out).replace([np.inf, -np.inf], np.nan).dropna()
+    out.attrs["field_unit"] = labels.detect_unit(*source) or ("µT" if any("Total_Field_uT" == s for s in source) else None)
+    return out
 
 
 def _standardize_location(df: pd.DataFrame) -> pd.DataFrame:
@@ -195,7 +209,7 @@ def read_survey_file(path: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     raise ValueError(f"Unsupported survey file type: {path.suffix}")
 
 
-def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellParams, *, synchronized_only=False) -> tuple[pd.DataFrame, dict[str, Any]]:
+def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: AnalysisParams, *, synchronized_only=False) -> tuple[pd.DataFrame, dict[str, Any]]:
     mag = _standardize_magnetometer(magdf)
     gps = _standardize_location(gpsdf).replace([np.inf, -np.inf], np.nan).dropna()
     if mag.empty or gps.empty:
@@ -205,10 +219,9 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellPar
 
     mag = mag.sort_values("Mag_Time (s)").drop_duplicates("Mag_Time (s)").reset_index(drop=True)
     gps = gps.sort_values("Loc_Time (s)").drop_duplicates("Loc_Time (s)").reset_index(drop=True)
-    if all(col in mag.columns for col in ["X (µT)", "Y (µT)", "Z (µT)"]):
-        mag["Total_Field_uT"] = np.sqrt(mag["X (µT)"] ** 2 + mag["Y (µT)"] ** 2 + mag["Z (µT)"] ** 2)
-    else:
-        mag["Total_Field_uT"] = mag["BT"]
+    # BT is the single total-field column (vector surveys compute it; scalar surveys already have it).
+    if all(col in mag.columns for col in ["X", "Y", "Z"]):
+        mag["BT"] = np.sqrt(mag["X"] ** 2 + mag["Y"] ** 2 + mag["Z"] ** 2)
 
     gt = gps["Loc_Time (s)"].to_numpy(dtype=float)
     mt = mag["Mag_Time (s)"].to_numpy(dtype=float)
@@ -220,7 +233,9 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellPar
     mag.loc[valid, "Latitude (°)"] = np.interp(mt[valid], gt, lat)
     mag.loc[valid, "Longitude (°)"] = np.interp(mt[valid], gt, lon)
 
-    interpolated = mag.dropna(subset=["Latitude (°)", "Longitude (°)"]).reset_index(drop=True)
+    # Synchronized samples are on the magnetometer clock; from here on that is the survey's "Time (s)".
+    interpolated = (mag.dropna(subset=["Latitude (°)", "Longitude (°)"]).reset_index(drop=True)
+                    .rename(columns={"Mag_Time (s)": "Time (s)"}))
     before_startup = len(interpolated)
     startup = 0 if synchronized_only else max(0, int(params.startup_samples))
     if startup:
@@ -252,10 +267,6 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellPar
     if len(cleaned) < 8:
         raise ValueError("Fewer than 8 samples remain after synchronization and cleaning. Check timestamps and startup removal.")
 
-    cleaned["Time (s)"] = cleaned["Mag_Time (s)"]
-    cleaned["BT"] = cleaned["Total_Field_uT"]
-    cleaned["easting"] = cleaned["Easting (m)"]
-    cleaned["northing"] = cleaned["Northing (m)"]
     cleaned["Distance (m)"] = np.sqrt(
         cleaned["Easting (m)"].diff().fillna(0) ** 2 + cleaned["Northing (m)"].diff().fillna(0) ** 2
     ).cumsum()
@@ -274,7 +285,96 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: OrphanWellPar
     return cleaned, audit
 
 
-def load_and_clean(path: str | Path, params: OrphanWellParams) -> tuple[pd.DataFrame, dict[str, Any]]:
+def _typical_band(values: np.ndarray) -> tuple[float, float]:
+    """Typical value (median) and tolerance (3 robust standard deviations, never tighter than 20 % of the median)."""
+    median = float(np.nanmedian(values))
+    sigma = 1.4826 * robust_mad(values)
+    return median, max(3.0 * sigma, 0.2 * abs(median))
+
+
+def suggest_cleaning_settings(magdf: pd.DataFrame, gpsdf: pd.DataFrame, *, stable_steps: int = 10,
+                              max_startup_fraction: float = 0.25) -> dict[str, Any]:
+    """Suggest startup removal and the spatial MAD multiplier from how the survey was recorded.
+
+    Startup: samples before the first run of `stable_steps` consecutive steps whose sampling interval, distance
+    travelled and change in total field are all typical for the survey (e.g. standing still while GPS settles,
+    positions jumping, irregular sampling, magnetometer warm-up spikes or offsets). Never more than
+    `max_startup_fraction` of the survey. The magnetic check only flags field changes that are too large, and only
+    affects where the startup ends: magnetic anomalies later in the survey are never removed, since they are the
+    signal being surveyed.
+
+    MAD multiplier: after startup removal, positions reached by an implausible jump (steps both into and out of the
+    position far longer than typical) are treated as off-track; the multiplier is the smallest value (in 0.5 steps,
+    plus 0.5 margin) whose radial limit keeps every on-track position. None when the radial MAD is zero
+    (the percentile fallback then applies).
+    """
+    sync, _ = clean_survey(magdf, gpsdf, AnalysisParams(), synchronized_only=True)
+    t = sync["Time (s)"].to_numpy(dtype=float)
+    east = sync["Easting (m)"].to_numpy(dtype=float)
+    north = sync["Northing (m)"].to_numpy(dtype=float)
+    dt = np.diff(t)
+    step = np.hypot(np.diff(east), np.diff(north))
+    field_change = np.diff(sync["BT"].to_numpy(dtype=float))
+    median_dt, tol_dt = _typical_band(dt)
+    median_step, tol_step = _typical_band(step)
+    # signed changes are symmetric around the trend, so 3 robust standard deviations means what it says
+    median_change, tol_change = _typical_band(field_change)
+    timing_ok = np.abs(dt - median_dt) <= tol_dt
+    movement_ok = np.abs(step - median_step) <= tol_step if median_step > 0 else np.ones(len(step), dtype=bool)
+    # only a change that is too large is abnormal (a steady field is fine)
+    magnetic_ok = np.abs(field_change - median_change) <= tol_change if tol_change > 0 else np.ones(len(step), dtype=bool)
+    normal = timing_ok & movement_ok & magnetic_ok
+
+    # step i joins sample i to sample i+1; keep from the first sample that starts a stable run
+    startup, stable_found = 0, False
+    for start in range(0, max(1, int(len(t) * max_startup_fraction)) + 1):
+        window = normal[start:start + stable_steps]
+        if len(window) == stable_steps and window.all():
+            startup, stable_found = start, True
+            break
+
+    kept_e, kept_n = east[startup:], north[startup:]
+    radial = np.hypot(kept_e - np.nanmedian(kept_e), kept_n - np.nanmedian(kept_n))
+    median_r, mad_r = float(np.nanmedian(radial)), robust_mad(radial)
+    kept_step = np.hypot(np.diff(kept_e), np.diff(kept_n))
+    jump = median_step + tol_step if median_step > 0 else np.inf
+    step_in = np.r_[np.nan, kept_step]
+    step_out = np.r_[kept_step, np.nan]
+    off_track = (step_in > jump) & (step_out > jump)
+    multiplier = None
+    if mad_r > 0:
+        needed = (float(np.nanmax(radial[~off_track])) - median_r) / mad_r
+        multiplier = float(min(100.0, max(0.5, np.ceil(needed * 2) / 2 + 0.5)))
+    return {
+        "startup_samples": int(startup),
+        "spatial_mad_multiplier": multiplier,
+        "median_interval_s": median_dt,
+        "median_step_m": median_step,
+        "field_change_noise": 1.4826 * robust_mad(field_change),  # in the survey's own unit
+        # how many steps before the startup cut-off failed each check (one step can fail several)
+        "startup_reasons": {"timing": int((~timing_ok[:startup]).sum()), "movement": int((~movement_ok[:startup]).sum()),
+                            "magnetic": int((~magnetic_ok[:startup]).sum())},
+        "stable_start_found": stable_found,
+        "off_track_samples": int(off_track.sum()),
+    }
+
+
+# Duplicate columns written by earlier versions (alias -> the column it copied).
+LEGACY_ALIASES = {"Total_Field_uT": "BT", "Filtered_Field_uT": "BT", "easting": "Easting (m)",
+                  "northing": "Northing (m)", "Mag_Time (s)": "Time (s)"}
+
+
+# Component columns named with a unit by earlier versions (values were in µT).
+LEGACY_COMPONENT_NAMES = {"X (µT)": "X", "Y (µT)": "Y", "Z (µT)": "Z"}
+
+
+def drop_legacy_aliases(frame: pd.DataFrame) -> pd.DataFrame:
+    """Bring data saved by earlier versions up to date: drop duplicate columns, unit-free component names."""
+    frame = frame.drop(columns=[alias for alias, kept in LEGACY_ALIASES.items() if alias in frame and kept in frame])
+    return frame.rename(columns={old: new for old, new in LEGACY_COMPONENT_NAMES.items() if old in frame and new not in frame})
+
+
+def load_and_clean(path: str | Path, params: AnalysisParams) -> tuple[pd.DataFrame, dict[str, Any]]:
     magdf, gpsdf = read_survey_file(path)
     return clean_survey(magdf, gpsdf, params)
 
@@ -299,7 +399,9 @@ def dominant_rate(values: np.ndarray, dt: float) -> float:
 
 def spectral_flatness(values: np.ndarray) -> float:
     arr = np.asarray(values, dtype=float) - np.nanmean(values)
-    power = np.abs(np.fft.rfft(arr)) ** 2 + 1e-12
+    power = np.abs(np.fft.rfft(arr)) ** 2
+    # guard against log(0) relative to the signal's own power, so any unit (T ... nT) gives the same result
+    power = power + max(float(np.nanmax(power)), np.finfo(float).tiny) * 1e-12
     return float(np.exp(np.mean(np.log(power))) / np.mean(power))
 
 
@@ -322,10 +424,14 @@ def median_speed_and_dt(df: pd.DataFrame) -> tuple[float, float]:
     return max(speed_med, 0.01), max(dt_med, 1e-3)
 
 
-def run_vmd_modes(df: pd.DataFrame, params: OrphanWellParams, field_column: str = "Total_Field_uT") -> tuple[np.ndarray, pd.DataFrame, list[int]]:
+def run_vmd_modes(df: pd.DataFrame, params: AnalysisParams, field_column: str = "BT") -> tuple[np.ndarray, pd.DataFrame, list[int]]:
     ordered = df.sort_values("Time (s)").reset_index(drop=True)
     signal = ordered[field_column].to_numpy(dtype=float)
     signal = signal - np.nanmedian(signal)
+    # VMD runs on the signal divided by its own spread and the modes are scaled back afterwards, so the
+    # decomposition (whose convergence test is absolute) behaves the same in any unit (T ... nT).
+    scale = float(np.nanstd(signal)) or 1.0
+    signal = signal / scale
     _, dt_med = median_speed_and_dt(ordered)
     if VMD is not None and len(signal) >= params.vmd_modes * 4:
         modes, _, _ = VMD(
@@ -344,6 +450,8 @@ def run_vmd_modes(df: pd.DataFrame, params: OrphanWellParams, field_column: str 
     if modes.shape[1] < len(signal):
         modes = np.pad(modes, ((0, 0), (0, len(signal) - modes.shape[1])), mode="edge")
     modes = modes[:, :len(signal)]
+    modes = modes * scale
+    signal = signal * scale
     modes, original_order = sort_modes_by_rate(modes, dt_med)
     metrics = mode_metrics(modes, signal, dt_med)
     selected_modes = select_modes(metrics, max_modes=int(params.max_selected_modes))
@@ -429,7 +537,8 @@ def score_trace(modes: np.ndarray, selected_modes: list[int], window: int, step:
         centers, rms = sliding_rms(modes[mode_num - 1], window, step)
         med = np.nanmedian(rms)
         mad = robust_mad(rms)
-        z = (rms - med) / (mad + 1e-9)
+        # relative guard instead of a fixed 1e-9, so the z-scores do not depend on the field unit
+        z = (rms - med) / (mad if mad > 0 else max(float(np.nanmax(np.abs(rms))), np.finfo(float).tiny) * 1e-9)
         if idx is None:
             idx = centers
         parts[f"z_mode_{mode_num}"] = z[: len(idx)]
@@ -442,7 +551,7 @@ def analyze_with_cached_modes(
     clean_df: pd.DataFrame,
     modes: np.ndarray,
     selected_modes: list[int],
-    params: OrphanWellParams,
+    params: AnalysisParams,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     ordered = clean_df.sort_values("Time (s)").reset_index(drop=True)
     speed_med, dt_med = median_speed_and_dt(ordered)
@@ -476,7 +585,7 @@ def analyze_with_cached_modes(
     return score_points, clusters, summary
 
 
-def cluster_hits(score_points: pd.DataFrame, params: OrphanWellParams, epsg: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+def cluster_hits(score_points: pd.DataFrame, params: AnalysisParams, epsg: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     out = score_points.copy()
     out["cluster_label"] = -1
     out["cluster_rank"] = np.nan
@@ -487,7 +596,7 @@ def cluster_hits(score_points: pd.DataFrame, params: OrphanWellParams, epsg: int
     labels = DBSCAN(eps=float(params.dbscan_eps_m), min_samples=int(params.dbscan_min_samples)).fit_predict(hit_xy)
     out.loc[hit_idx, "cluster_label"] = labels
 
-    well = well_utm(params, epsg)
+    reference = reference_utm(params, epsg)
     cluster_rows = []
     for label in sorted(set(labels)):
         if label < 0:
@@ -526,8 +635,8 @@ def cluster_hits(score_points: pd.DataFrame, params: OrphanWellParams, epsg: int
                 "uncertainty_radius_m": radius,
                 "elongation_ratio": elongation,
                 "orientation_deg": orientation,
-                "dist_to_well_m": (
-                    float(math.hypot(centroid_e - well[0], centroid_n - well[1])) if well is not None else math.nan
+                "dist_to_reference_m": (
+                    float(math.hypot(centroid_e - reference[0], centroid_n - reference[1])) if reference is not None else math.nan
                 ),
             }
         )
@@ -556,7 +665,7 @@ def summarize_analysis(
     score_points: pd.DataFrame,
     clusters: pd.DataFrame,
     selected_modes: list[int],
-    params: OrphanWellParams,
+    params: AnalysisParams,
     window: int,
     step: int,
     threshold: float,
@@ -577,7 +686,7 @@ def summarize_analysis(
             "candidate_peak_score": float(row["peak_score"]),
         }
         if params.reference_known:
-            candidate["candidate_distance_to_well_m"] = float(row["dist_to_well_m"])
+            candidate["candidate_distance_to_reference_m"] = float(row["dist_to_reference_m"])
     summary = {
         "n_samples": int(len(clean_df)),
         "utm_zone": utm_zone_label(survey_epsg(clean_df)),
@@ -603,11 +712,11 @@ def annotate_clean_points(
     clusters: pd.DataFrame,
 ) -> pd.DataFrame:
     out = clean_df.copy()
-    out["OW_Score"] = np.nan
-    out["OW_Threshold"] = np.nan
-    out["OW_Is_Hit"] = False
-    out["OW_Cluster_Label"] = -1
-    out["OW_Label"] = "background"
+    out["Anomaly_Score"] = np.nan
+    out["Anomaly_Threshold"] = np.nan
+    out["Anomaly_Is_Hit"] = False
+    out["Anomaly_Cluster_Label"] = -1
+    out["Anomaly_Label"] = "background"
     if score_points.empty:
         return out
     selected_labels = set(
@@ -618,14 +727,14 @@ def annotate_clean_points(
         if idx < 0 or idx >= len(out):
             continue
         label = int(row.get("cluster_label", -1))
-        out.at[idx, "OW_Score"] = float(row["score"])
-        out.at[idx, "OW_Threshold"] = float(row["threshold"])
-        out.at[idx, "OW_Is_Hit"] = bool(row["is_hit"])
-        out.at[idx, "OW_Cluster_Label"] = label
+        out.at[idx, "Anomaly_Score"] = float(row["score"])
+        out.at[idx, "Anomaly_Threshold"] = float(row["threshold"])
+        out.at[idx, "Anomaly_Is_Hit"] = bool(row["is_hit"])
+        out.at[idx, "Anomaly_Cluster_Label"] = label
         if bool(row["is_hit"]) and label in selected_labels:
-            out.at[idx, "OW_Label"] = "selected candidate"
+            out.at[idx, "Anomaly_Label"] = "selected candidate"
         elif bool(row["is_hit"]) and label >= 0:
-            out.at[idx, "OW_Label"] = "secondary cluster"
+            out.at[idx, "Anomaly_Label"] = "secondary cluster"
         elif bool(row["is_hit"]):
-            out.at[idx, "OW_Label"] = "unclustered hit"
+            out.at[idx, "Anomaly_Label"] = "unclustered hit"
     return out

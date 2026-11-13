@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-
 import matplotlib.pyplot as plt
 import matplotlib.path as mpath
 import matplotlib.tri as mtri
@@ -8,8 +7,9 @@ from scipy.interpolate import griddata
 from scipy.spatial import Delaunay
 from scipy.spatial import ConvexHull
 import pyproj
+from processing import labels
 
-# Optional packages (not in requirements.txt): the app still runs without them,
+# Optional packages (not in requirements.txt):
 # falling back or explaining what to install when a feature needs one.
 try:
     from concave_hull import concave_hull_indexes
@@ -42,17 +42,11 @@ class MapMaker:
         -------
             znew (array) : a copy of z with nan when outside convexHull
         """
-        knownPoints = np.array([xdata, ydata]).T
-        newPoints = np.array([x,y]).T
-        _, idx = np.unique(xdata+ydata, return_index=1)
-        q = ConvexHull(knownPoints[idx,:])
-        hull = Delaunay(q.points[q.vertices, :])
-    #    qq = q.points[q.vertices,:]
-
-        znew = np.copy(z)
-        for i in range(0, len(z)):
-            if hull.find_simplex(newPoints[i,:]) < 0:
-                znew[i] = np.nan
+        knownPoints = np.unique(np.array([xdata, ydata], dtype=float).T, axis=0)
+        hull = Delaunay(knownPoints[ConvexHull(knownPoints).vertices])
+        znew = np.array(z, dtype=float, copy=True)
+        # test every interpolation point at once (much faster than one at a time for raster grids)
+        znew[hull.find_simplex(np.c_[x, y]) < 0] = np.nan
         return znew
 
 
@@ -166,14 +160,17 @@ class MapMaker:
         return cax
 
 
+    @staticmethod
     def idw(xnew, ynew, xknown, yknown, zknown, n=1):
-        '''Inverse Distance Weighting'''
+        '''Inverse Distance Weighting (n is the distance power; 2 is the common choice).'''
         znew = np.zeros(len(xnew))
         for i,(x,y) in enumerate(zip(xnew, ynew)):
-    #        dist = pdist(x, y, xknown, yknown)
             dist = np.sqrt((x-xknown)**2+(y-yknown)**2)
-            # if we consider all the points (might be not good)
-            w = (1/dist)**n # exponent to be chosen
+            exact = dist == 0
+            if exact.any():  # a grid node on a measurement takes that measurement
+                znew[i] = np.mean(zknown[exact])
+                continue
+            w = (1/dist)**n
             znew[i] = np.sum(zknown*w)/np.sum(w)
         return znew
 
@@ -270,7 +267,7 @@ class MapMaker:
 
     def showMap(self, df, contour=False, ax=None, vmin=None, vmax=None, cax=None,
                     pts=False, cmap='viridis', xlab='x', ylab='y', levels=[],
-                    cbar_label='Total Magnetic Field [uT]'):
+                    cbar_label=None):
             """ Display a map of the measurements.
 
             Parameters
@@ -332,7 +329,7 @@ class MapMaker:
             ax.get_yaxis().get_major_formatter().set_useOffset(False)
             ax.get_xaxis().get_major_formatter().set_scientific(False)
             ax.get_yaxis().get_major_formatter().set_scientific(False)
-            fig.colorbar(cax, ax=ax, label=cbar_label)
+            fig.colorbar(cax, ax=ax, label=cbar_label or labels.total_field_label())
             if ax is None:
                 return fig
 
@@ -348,118 +345,123 @@ class MapMaker:
         levels = np.linspace(vmin, vmax, 14)
         #plt.figure(figsize=(10, 6))
         contour_plot = ax.contourf(xmesh, ymesh, val, cmap='viridis')
-        fig.colorbar(contour_plot, ax=ax, label='BT (µT)')
+        fig.colorbar(contour_plot, ax=ax, label=labels.total_field_label())
         plt.xlabel('Easting')
         plt.ylabel('Northing')
         plt.title('Original BT')
         return fig
 
-    def saveMap(self, fname, nx=100, ny=100, method='linear',
-                xmin=None, xmax=None, ymin=None, ymax=None, cmap='viridis',
-                vmin=None, vmax=None, nlevel=14, targetProjection='EPSG:4326'):
-        """Save a georeferenced raster TIFF file.
+    def saveMap(self, fname, df=None, value_column='BT', cell_size=None, method='linear',
+                projection='utm', output='values', cmap='viridis', vmin=None, vmax=None,
+                nlevel=256, nx=100, ny=100, units='µT'):
+        """Save a georeferenced raster (GeoTIFF) of a survey field on a north-up grid.
 
         Parameters
         ----------
-        df : pandas.DataFrame
-            DataFrame containing x, y (coordinates), and bt (total magnetic field)
         fname : str
-            Path of where to save the .tiff file.
-        nx : int, optional
-            Number of points in x direction.
-        ny : int, optional
-            Number of points in y direction.
+            Path of the .tif file to write.
+        df : pandas.DataFrame, optional
+            Survey data. Defaults to the data given to MapMaker (or read from its file path).
+        value_column : str, optional
+            Column to rasterize, e.g. 'BT' or 'X'.
+        units : str, optional
+            Unit of the values (written to the GeoTIFF metadata), e.g. 'nT' or 'µT'.
+        cell_size : float, optional
+            Raster cell size in metres. If None, the grid is nx by ny cells.
         method : str, optional
-            Interpolation method (nearest, cubic or linear see
-            `scipy.interpolate.griddata`) or IDW (default).
-        xmin : float, optional
-            Mininum X value.
-        xmax : float, optional
-            Maximum X value.
-        ymin : float, optional
-            Minimium Y value.
-        ymax : float, optional
-            Maximum Y value
-        cmap : str, optional
-            If `color == True`, name of the colormap. Default is viridis.
-        vmin : float, optional
-            Minimum value for colomap.
-        vmax : float, optional
-            Maximum value for colormap.
-        nlevel : int, optional
-            Number of level in the colormap. Default 7.
-        targetProjection : str, optional
-            Target CRS, in EPSG number: e.g. `targetProjection='EPSG:4326'` Default DMS
-        """
+            'linear', 'cubic' or 'nearest' (scipy griddata), 'idw' or 'kriging' (needs pykrige).
+        projection : str, optional
+            'utm' writes metric Easting/Northing in the survey's UTM zone (square cells);
+            'wgs84' writes longitude/latitude (EPSG:4326).
+        output : str, optional
+            'values' writes one 32-bit float band of field values (NaN outside the survey), for GIS analysis;
+            'rgba' writes a coloured image using cmap and vmin/vmax, transparent outside the survey.
+        cmap, vmin, vmax, nlevel : optional
+            Colour map, colour limits (default: data range) and number of colours for output='rgba'.
+        nx, ny : int, optional
+            Grid size when cell_size is None.
 
+        Returns
+        -------
+        dict
+            Raster width, height, CRS and cell size.
+        """
         if rasterio is None:
             raise ImportError('rasterio is needed to save georeferenced .tif file. Install it with "pip install rasterio"')
+        data = df if df is not None else (self.fp if isinstance(self.fp, pd.DataFrame) else pd.read_csv(self.fp))
+        data = data.dropna(subset=[value_column])
+        values = data[value_column].to_numpy(dtype=float)
+        if projection == 'utm':
+            if not {'Easting (m)', 'Northing (m)', 'UTM_EPSG'} <= set(data.columns):
+                raise ValueError('UTM output needs Easting (m), Northing (m) and UTM_EPSG columns.')
+            xknown = data['Easting (m)'].to_numpy(dtype=float)
+            yknown = data['Northing (m)'].to_numpy(dtype=float)
+            crs = f"EPSG:{int(data['UTM_EPSG'].iloc[0])}"
+        elif projection == 'wgs84':
+            xknown = data['Longitude (°)'].to_numpy(dtype=float)
+            yknown = data['Latitude (°)'].to_numpy(dtype=float)
+            crs = 'EPSG:4326'
+        else:
+            raise ValueError("projection must be 'utm' or 'wgs84'.")
+        if len(np.unique(np.c_[xknown, yknown], axis=0)) < 3:
+            raise ValueError('At least three distinct survey positions are needed for a raster.')
+        xmin, xmax, ymin, ymax = xknown.min(), xknown.max(), yknown.min(), yknown.max()
 
-        self.df = pd.read_csv(self.fp)
-        xknown = self.df['Longitude (°)'].values
-        yknown = self.df['Latitude (°)'].values
-        if xmin is None:
-            xmin = np.min(xknown)
-        if xmax is None:
-            xmax = np.max(xknown)
-        if ymin is None:
-            ymin = np.min(yknown)
-        if ymax is None:
-            ymax = np.max(yknown)
-        X, Y = np.meshgrid(np.linspace(xmin, xmax, nx),
-                           np.linspace(ymin, ymax, ny))
-        x, y = X.flatten(), Y.flatten()
+        # cell size in the output units (metres for UTM, degrees for WGS 84)
+        if cell_size is None:
+            xres, yres = (xmax - xmin) / max(nx - 1, 1), (ymax - ymin) / max(ny - 1, 1)
+        elif projection == 'utm':
+            xres = yres = float(cell_size)
+        else:
+            yres = float(cell_size) / 111_132.0
+            xres = float(cell_size) / (111_320.0 * np.cos(np.radians(np.mean(yknown))))
+        if xres <= 0 or yres <= 0:
+            raise ValueError('The survey extent and cell size must be positive.')
+        ncols = int(np.floor((xmax - xmin) / xres)) + 1
+        nrows = int(np.floor((ymax - ymin) / yres)) + 1
+        if ncols * nrows > 25_000_000:
+            raise ValueError(f'A {ncols} x {nrows} raster is too large; choose a larger cell size.')
 
-        # compute convex hull
-        inside = np.ones(nx*ny)
-        # inside2 = clipConvexHull(xknown, yknown, x, y, inside)
-        inside2 = self.clipConcaveHull(xknown, yknown, x, y, inside)
-
-        ie = np.isnan(inside2).reshape(X.shape)
-
-        values = self.df['BT'].values
+        # cell centres, north-up: row 0 is the northern edge
+        gx = xmin + xres * np.arange(ncols)
+        gy = ymax - yres * np.arange(nrows)
+        X, Y = np.meshgrid(gx, gy)
         if method == 'idw':
-            z = self.idw(x, y, xknown, yknown, values)
-            z = z.reshape(X.shape)
+            z = self.idw(X.ravel(), Y.ravel(), xknown, yknown, values, n=2).reshape(X.shape)
         elif method == 'kriging':
             if OrdinaryKriging is None:
                 raise ImportError('pykrige is needed for kriging interpolation. Install it with "pip install pykrige"')
-            gridx = np.linspace(xmin, xmax, nx)
-            gridy = np.linspace(ymin, ymax, ny)
             OK = OrdinaryKriging(xknown, yknown, values, variogram_model='linear',
-                                verbose=True, enable_plotting=False, nlags=25)
-            z, ss = OK.execute('grid', gridx, gridy)
-        else:
+                                 verbose=False, enable_plotting=False, nlags=25)
+            z, _ = OK.execute('grid', gx, gy[::-1])
+            z = np.flipud(np.asarray(z, dtype=float))
+        elif method in ('linear', 'cubic', 'nearest'):
             z = griddata(np.c_[xknown, yknown], values, (X, Y), method=method)
-        z[ie] = np.nan
-        Z = np.flipud(z.T)
-        Z = np.fliplr(np.flipud(Z.T))
+        else:
+            raise ValueError(f'Unknown interpolation method: {method}')
+        z = np.asarray(z, dtype=float)
+        # leave cells outside the surveyed area empty
+        outside = np.isnan(self.clipConcaveHull(xknown, yknown, X.ravel(), Y.ravel(), np.ones(X.size))).reshape(X.shape)
+        z[outside] = np.nan
 
-        # distance between corners
-        dist0 = np.abs(xmax - xmin)
-        dist1 = np.abs(ymax - ymin)
-        yscale = dist1/Z.shape[0]
-        xscale = dist0/Z.shape[1]
-
-        # compute affine transform
-        tOffsetScaling = from_origin(xmin - xscale/2, ymax - yscale/2, xscale, yscale)
-        tt = tOffsetScaling
-
-        if vmin is None:
-            vmin = np.nanpercentile(Z.flatten(), 2)
-        if vmax is None:
-            vmax = np.nanpercentile(Z.flatten(), 98)
-        norm = plt.Normalize(vmin=vmin, vmax=vmax)
-        Z = plt.get_cmap(cmap, nlevel)(norm(Z))
-        Z = 255*Z
-        Z = Z.astype('uint8')
-        for i in range(4):
-            Z[np.fliplr(ie.T).T, i] = 0
-
-        with rasterio.open(fname, 'w',
-                    driver='GTiff',
-                    height=Z.shape[0],
-                    width=Z.shape[1], count=4, dtype=Z.dtype,
-                    crs=targetProjection, transform=tt) as dst:
-            for i in range(4):  # RGB + mask
-                dst.write(Z[:,:,i], i+1)
+        # top-left corner of the top-left cell
+        transform = from_origin(gx[0] - xres / 2, gy[0] + yres / 2, xres, yres)
+        profile = dict(driver='GTiff', height=nrows, width=ncols, crs=crs, transform=transform, compress='deflate')
+        if output == 'values':
+            with rasterio.open(fname, 'w', count=1, dtype='float32', nodata=np.nan, **profile) as dst:
+                dst.write(z.astype('float32'), 1)
+                dst.set_band_description(1, value_column)
+                dst.update_tags(1, field=value_column, units=units, interpolation=method)
+        elif output == 'rgba':
+            lo = np.nanmin(z) if vmin is None else vmin
+            hi = np.nanmax(z) if vmax is None else vmax
+            rgba = plt.get_cmap(cmap, nlevel)(plt.Normalize(vmin=lo, vmax=hi)(z))
+            rgba = (255 * rgba).astype('uint8')
+            rgba[..., 3] = np.where(np.isfinite(z), 255, 0)
+            with rasterio.open(fname, 'w', count=4, dtype='uint8', **profile) as dst:
+                for band in range(4):  # red, green, blue, alpha
+                    dst.write(rgba[:, :, band], band + 1)
+                dst.update_tags(field=value_column, units=units, interpolation=method, color_min=str(lo), color_max=str(hi), colormap=cmap)
+        else:
+            raise ValueError("output must be 'values' or 'rgba'.")
+        return {'width': ncols, 'height': nrows, 'crs': crs, 'cell_size_x': xres, 'cell_size_y': yres}

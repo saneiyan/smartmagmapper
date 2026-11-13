@@ -7,7 +7,8 @@ import ppigrf
 import datetime as dt
 import harmonica as hm
 import xarray as xr
-import OrphanWellPipeline as ow
+from processing import data_analysis_pipeline as dap
+from processing import labels
 
 try:
     from vmdpy import VMD
@@ -33,7 +34,8 @@ class MapFilter:
     @staticmethod
     def _spectral_flatness(values):
         arr = np.asarray(values, dtype=float) - np.nanmean(values)
-        power = np.abs(np.fft.rfft(arr)) ** 2 + 1e-12
+        power = np.abs(np.fft.rfft(arr)) ** 2
+        power = power + max(float(np.nanmax(power)), np.finfo(float).tiny) * 1e-12  # relative guard: any unit
         return float(np.exp(np.mean(np.log(power))) / np.mean(power))
 
     @staticmethod
@@ -48,17 +50,17 @@ class MapFilter:
         return 1.0
 
     def variational_mode_decomposition(self, k_modes=10, alpha=2000.0, max_modes=2):
-        if ow.VMD is None:
+        if dap.VMD is None:
             raise ImportError('The vmdpy package is required for the VMD map filter.')
         out = self.df.copy(deep=True)
         if len(out) < max(int(k_modes) * 4, 20):
             raise ValueError('Not enough samples for VMD filtering.')
-        params = ow.OrphanWellParams(vmd_modes=int(k_modes), vmd_alpha=float(alpha),
+        params = dap.AnalysisParams(vmd_modes=int(k_modes), vmd_alpha=float(alpha),
                                     max_selected_modes=int(max_modes))
         signal = pd.to_numeric(out['BT'], errors='coerce').to_numpy(dtype=float)
         if not np.isfinite(signal).all():
             raise ValueError('VMD needs finite magnetic values.')
-        modes, metrics, selected = ow.run_vmd_modes(out, params, field_column='BT')
+        modes, metrics, selected = dap.run_vmd_modes(out, params, field_column='BT')
         reconstructed = modes[[mode - 1 for mode in selected]].sum(axis=0) + float(np.median(signal))
         if 'BT_Original' not in out.columns:
             out['BT_Original'] = out['BT']
@@ -184,7 +186,7 @@ class MapFilter:
         return rtp, lon_mesh, lat_mesh
 
     def _with_residual(self, background):
-        '''Copy of the data with BT replaced by BT minus the given background (µT).'''
+        '''Copy of the data with BT replaced by BT minus the given background (in the survey's unit).'''
         out = self.df.copy()
         out['Background_BT'] = background
         out['Residual_BT'] = out['BT'].to_numpy(dtype=float) - background
@@ -227,8 +229,10 @@ class MapFilter:
             fit_mask = new_mask
         return self._with_residual(design @ coef)
 
-    def residual_igrf(self, year, month, day):
+    def residual_igrf(self, year, month, day, unit='µT'):
         '''Removes the IGRF model Earth field for each point's location on the survey date.
+
+        unit is the unit of the survey's BT values (IGRF is computed in nT and converted to it).
 
         Returns
         -------
@@ -239,8 +243,8 @@ class MapFilter:
         lat = self.df['Latitude (°)'].to_numpy(dtype=float)
         lon = self.df['Longitude (°)'].to_numpy(dtype=float)
         Be, Bn, Bu = ppigrf.igrf(lon=lon, lat=lat, h=0, date=date)
-        #IGRF is in nT, BT is in µT
-        background = np.sqrt(Be ** 2 + Bn ** 2 + Bu ** 2).ravel() / 1000.0
+        #IGRF is in nT; express it in the survey's unit
+        background = np.sqrt(Be ** 2 + Bn ** 2 + Bu ** 2).ravel() * labels.unit_factor('nT', unit)
         return self._with_residual(background)
 
     def reduction_to_pole_points(self, year, month, day):

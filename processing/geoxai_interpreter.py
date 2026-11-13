@@ -101,7 +101,7 @@ def explain_candidate(
     score_points: pd.DataFrame,
     clusters: pd.DataFrame,
     summary: dict[str, Any],
-    reference_known: bool = False,
+   reference_known: bool,
 ) -> GeoXAIReport:
     cluster_scores = score_clusters(score_points, clusters)
     contributions = selected_contributions(cluster_scores)
@@ -109,7 +109,7 @@ def explain_candidate(
     if clusters is None or clusters.empty or "candidate_latitude" not in summary:
         mode = "Known-reference mode" if reference_known else "Unknown-location mode"
         narrative = (
-            f"Explainable AI (XAI) — {mode}\n\n"
+            f"{mode}\n\n"
             "No explainable candidate was available because the current parameters did not produce a selected "
             "cluster. Lower the threshold gamma, increase DBSCAN eps, or reduce DBSCAN minimum samples and rerun."
         )
@@ -128,15 +128,14 @@ def explain_candidate(
 
     if reference_known:
         reference_text = (
-            "The entered reference well is used only as validation/context here; it does not affect which "
-            "candidate is selected. "
-            f"The selected candidate is {summary.get('candidate_distance_to_well_m', 0.0):.2f} m from that point."
+            f"The entered reference location is used only as validation/context here. "
+            f"The selected candidate is {summary.get('candidate_distance_to_reference_m', 0.0):.2f} m from that point."
         )
         mode = "Known-reference interpretation"
     else:
         reference_text = (
-            "The candidate well location is estimated from the magnetic anomaly evidence, "
-            "cluster support and compactness. Any entered coordinate is treated as a map/search context, "
+            "The candidate source location is estimated from the magnetic anomaly evidence, "
+            "cluster support, compactness, and uncertainty. Any entered coordinate is treated as a map/search context, "
             "not ground truth."
         )
         mode = "Unknown-location GeoXAI interpretation"
@@ -148,20 +147,18 @@ def explain_candidate(
         else f"It does not pass the support gate of {support_threshold} windows, so review it cautiously."
     )
     narrative = (
-        f"Explainable AI (XAI) — {mode}\n\n"
+        f"{mode}\n\n"
         f"Selected candidate: C{candidate_label} at lat {lat:.6f}, lon {lon:.6f}.\n"
-        f"XAI evidence score: {confidence:.1f}/100. A rule-based, weighted evidence summary; not a trained AI classifier or a calibrated probability of a well.\n"
-        "Weights: support 30%, peak response 25%, compactness 25%, shape coherence 10%, threshold separation 10%. Scores are relative to the current survey clusters.\n\n"
-        "Selection and explanation are separate: the pipeline applies a support gate then selects a compact cluster. The XAI score describes the evidence; it does not select the location.\n\n"
+        f"GeoXAI confidence: {confidence:.1f}/100. This is an interpretability score, not proof of a magnetic source.\n\n"
         f"Why this candidate was selected:\n"
         f"- Support: {support} anomaly-score windows are assigned to this cluster. {eligibility}\n"
         f"- Peak response: the cluster reaches a score of {peak:.2f}, indicating a strong localized magnetic response.\n"
-        f"- Compactness: the weighted RMS cluster spread is {radius:.2f} m; smaller compact clusters are preferred. Spread is not a confidence interval.\n"
+        f"- Compactness: the estimated uncertainty radius is {radius:.2f} m; smaller compact clusters are preferred.\n"
         f"- Threshold separation: the median score margin above threshold is {margin:.2f}.\n"
-        f"- Spatial logic: the candidate selection does not need the true well coordinate; it uses the score-window "
+        f"- Spatial logic: the candidate selection does not need a known reference coordinate; it uses the score-window "
         f"geometry and DBSCAN cluster shape.\n\n"
         f"{reference_text}\n\n"
         f"Recommended field use: navigate to the candidate centroid, sweep a radius of about {max(radius, 3.0):.1f} m, "
-        "and confirm with repeated passes or another sensor before treating it as a final well location."
+        "and confirm with repeated passes or another sensor before treating it as a final source location."
     )
     return GeoXAIReport(narrative=narrative, cluster_scores=cluster_scores, contributions=contributions)
