@@ -1,9 +1,6 @@
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget
-from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEngineSettings
-import PyQt6.QtCore as QtCore
+"""Folium web maps of survey data (no PyQt: usable from scripts). The on-screen widget is ui.web_map_widget."""
 import tempfile
-from PyQt6.QtCore import QUrl
+from processing import labels
 import folium
 import numpy as np
 import branca.colormap as cm
@@ -38,7 +35,17 @@ CONTROL_BACKGROUND_CSS = '''
 </style>
 '''
 
-def build_map(df, value_column='BT', caption='BT (µT)', vmin=None, vmax=None, colors=None,
+# Satellite imagery shared by every web map in the app (Data & Cleaning and Location Estimate).
+GOOGLE_SATELLITE = dict(tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google',
+                        max_zoom=25, name='Google Satellite')
+
+
+def add_satellite_layer(m, **options):
+    '''Add the Google satellite imagery layer to a folium map (options such as show=True pass through).'''
+    folium.TileLayer(**GOOGLE_SATELLITE, **options).add_to(m)
+
+
+def build_map(df, value_column='BT', caption=None, vmin=None, vmax=None, colors=None,
               excluded=None, excluded_name='Excluded Positions', layer_name='Points', zoom=18):
     '''Builds the satellite web map and saves it to a temporary html file.
 
@@ -46,7 +53,7 @@ def build_map(df, value_column='BT', caption='BT (µT)', vmin=None, vmax=None, c
     ----------
         df (DataFrame): Survey points with 'Latitude (°)', 'Longitude (°)' and value_column.
         value_column (str, optional): Column used to colour the points. Defaults to 'BT'.
-        caption (str, optional): Colour scale caption.
+        caption (str, optional): Colour scale caption (default: the column's label in the current unit).
         vmin, vmax (float, optional): Colour scale limits, 2nd/98th percentile when not given.
         colors (list, optional): Colour ramp; defaults to blue, green, yellow.
         excluded (DataFrame, optional): Points drawn as red outlined markers on their own layer.
@@ -62,11 +69,7 @@ def build_map(df, value_column='BT', caption='BT (µT)', vmin=None, vmax=None, c
     #create the map, control_scale adds the distance scale bar in the bottom left
     m = folium.Map(location=[y.mean(), x.mean()], zoom_start=zoom, prefer_canvas=True, tiles=None, control_scale=True)
     #adding satellite imagery tile
-    folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-        attr='Google',
-        max_zoom=25,
-        name='Google Satellite').add_to(m)
+    add_satellite_layer(m)
     #adding circle markers for each data point in the imported dataframe
     fg = folium.FeatureGroup(name=layer_name)
     for lat, lon, val in zip(y, x, bt):
@@ -82,7 +85,7 @@ def build_map(df, value_column='BT', caption='BT (µT)', vmin=None, vmax=None, c
         m.add_child(ex)
         folium.LayerControl(collapsed=False).add_to(m)
     #value scale legend in the top right
-    colormap.caption = caption
+    colormap.caption = caption or labels.field_label(value_column, short=True)
     colormap.add_to(m)
     #north arrow below the zoom buttons
     m.get_root().html.add_child(folium.Element(NORTH_ARROW_HTML))
@@ -100,16 +103,3 @@ def color_map(bt, vmin=None, vmax=None, colors=None):
     if lo >= hi:
         lo, hi = np.nanpercentile(bt, 2), np.nanpercentile(bt, 98)
     return cm.LinearColormap(colors=colors or ['blue', 'green', 'yellow'], vmin=lo, vmax=hi)
-
-class MapWidget(QWebEngineView):
-    def __init__(self, df, caption='BT (µT)', vmin=None, vmax=None):
-        super().__init__()
-        self.df = df
-        self.caption = caption
-        self.vmin = vmin
-        self.vmax = vmax
-        self.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
-        self.bt = self.df['BT']
-        #loading the map onto the view
-        self.url = QtCore.QUrl.fromLocalFile(build_map(df, caption=caption, vmin=vmin, vmax=vmax))
-        self.load(self.url)

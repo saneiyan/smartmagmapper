@@ -1,41 +1,47 @@
-# OrphaMag Studio
+# SmartMagMapper
 
-OrphaMag Studio is a Windows desktop application for reviewing smartphone magnetometer surveys and estimating candidate orphan-well locations. It is built from the MagPy application and adds the OrphaMag workflow for cleaning survey data, calculating anomaly scores, clustering candidate windows, and explaining the selected result with GeoXAI.
+SmartMagMapper is a desktop application for processing and interpreting magnetic survey data, such as smartphone magnetometer surveys. It synchronizes magnetometer and GPS records, cleans the survey, applies time-series and spatial filters, maps the magnetic field, and detects, clusters and explains magnetic anomalies with GeoXAI.
 
 ## What Is Included
 
-This repository contains the application source code and launch files.
+This repository contains the application source code.
 
-Important files:
+The code is split into two packages:
 
-- `GUI.py` - main desktop application.
-- `OrphanWellPipeline.py` - orphan-well processing workflow.
-- `GeoXAIInterpreter.py` - explanation layer for candidate estimates.
-- `DialogWindow.py`, `ExcelReader.py`, `MapFilter.py`, `MapMaker.py`, `TableModel.py`, `WebMap.py` - original MagPy support modules.
+- `GUI.py` - the main window and the application launcher (run this file). It builds the window and its tabs; its behaviour comes from these modules in `ui/`: `survey_actions.py` (import and cleaning actions), `analysis_tab.py` (Anomaly Analysis tab), `location_tab.py` (Location Estimate tab), `map_field.py` (current map field and map filters) and `exports.py` (File > Export Data).
+- `ui/` - the rest of the user interface (PyQt6):
+  - `data_workspace.py` - the Data & Cleaning tab (cleaning settings, cleaning maps, data tables, signal plots).
+  - `filter_workspace.py`, `filter_comparison.py`, `vmd_panel.py` - the Filter Lab tab.
+  - `dialogs.py` - the import and export dialogs; `project_tools.py` - project files and the File/Edit/View/Tools menus.
+  - `theme.py`, `table_model.py`, `web_map_widget.py`, `busy.py`, `confirm.py` - styling, tables, the web-map view and shared pop-ups.
+- `processing/` - data processing with no PyQt6 dependency, usable from scripts:
+  - `data_analysis_pipeline.py` - survey import, synchronization, cleaning, suggested cleaning settings and anomaly analysis.
+  - `scientific_filters.py` - Filter Lab filters; `map_filter.py` - map transforms (residual fields, continuation, reduction to pole, VMD).
+  - `geoxai_interpreter.py` - explanation layer for anomaly candidates; `survey_session.py`, `project_io.py` - survey state and project files.
+  - `map_maker.py` - maps and GeoTIFF export; `web_map.py` - web maps (folium); `comparison_spectrum.py`, `excel_reader.py` - supporting functions.
 - `requirements.txt` - Python packages needed to run the app.
 
+For example, a script can run the processing without the interface:
+
+```python
+from processing import data_analysis_pipeline as dap
+mag, gps = dap.read_survey_file('survey.xlsx')
+cleaned, audit = dap.clean_survey(mag, gps, dap.AnalysisParams())
+```
 
 Survey data files are not included in this repository. Each user should load survey files from their own computer using the app.
 
 ## Install
 
-Use Python 3.10 or newer on Windows.
+Use Python 3.10 or newer (tested with Python 3.11 on Windows 64-bit).
 
-Open PowerShell in the project folder and run:
-
-```powershell
-pip install -r requirements.txt
-```
-
-If `pip` points to a different Python installation, use:
+Open a terminal in the project folder and run:
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
 ## Run The App
-
-From PowerShell:
 
 ```powershell
 python GUI.py
@@ -44,76 +50,66 @@ python GUI.py
 ## Load A Survey
 
 1. Open the app.
-2. Go to the `OrphaMag` tab.
-3. Click the top toolbar button `Import Data`.
-4. Select the survey workbook from your computer.
-5. Review the maps, plots, scores, clusters, candidate estimate, and GeoXAI explanation.
+2. Choose `File > Import Data...` (or start with `File > New Project` / `File > Open Project...`).
+3. Select the survey file (Excel or CSV) and assign the magnetic, coordinate and time columns.
+4. Review the cleaning, filters, anomaly analysis and location estimate in the main tabs.
 
-The OrphaMag workflow expects survey workbooks that include smartphone location and magnetometer data. The original Butkowsky survey workbooks used `Location` and `Magnetometer` sheets.
+Survey files need magnetometer data (X/Y/Z components or total field) and GPS positions with timestamps. Excel workbooks may keep them on separate `Magnetometer` and `Location` sheets.
 
-## OrphaMag Workflow
+### Units and coordinate formats
 
-The app performs these main steps:
+The Import Data dialog asks for:
 
-1. Reads the survey workbook.
-2. Synchronizes location and magnetometer records.
-3. Converts latitude and longitude to UTM coordinates.
-4. Removes startup samples and spatial outliers.
-5. Calculates total magnetic field.
-6. Applies VMD-based mode selection.
-7. Computes anomaly scores over moving windows.
-8. Uses DBSCAN to cluster high-score windows.
-9. Selects a candidate orphan-well estimate.
-10. Generates GeoXAI interpretation for the result.
+- **Magnetic field unit**: nT, µT (default), mT, T, G or mG. It is suggested from the column headers when they include a unit, e.g. `X (nT)`. Values are never converted. The unit is stored with the survey in the project, and every label, axis, colour bar, table header, exported CSV column (`BT (nT)`, ...) and GeoTIFF shows it. Internally the field columns are unit-free: `BT`, `X`, `Y`, `Z`. Projects saved before units were added open as µT.
+- **Coordinate format**: decimal degrees (default); degrees + decimal minutes (`45°07.407'N`, `45 07.407`, NMEA `4507.407`); degrees-minutes-seconds (`45°07'24.4"N`, `45 7 24.4`); or projected metres with an EPSG code (e.g. `32618` for UTM 18N). Coordinates are converted to decimal degrees (WGS 84) for processing. The original columns are kept in the raw GPS data, and the format is saved with the project.
+
+## Processing Workflow
+
+1. Reads the survey and standardizes column names.
+2. Synchronizes magnetometer samples with GPS positions (linear interpolation in time).
+3. Converts latitude and longitude to one UTM zone for the whole survey.
+4. Removes startup samples and spatial outliers (median radius + MAD rule). Both settings are suggested from the survey itself: startup samples end where the sampling interval, distance travelled and change in magnetic field per sample become steady (catching GPS settling and magnetometer warm-up; later magnetic anomalies are never removed), and the MAD multiplier keeps every position reached by a normal step while rejecting GPS jumps.
+5. Calculates the total magnetic field (BT).
+6. Optionally filters the field (Filter Lab).
+7. Decomposes the field with VMD and selects anomaly-bearing modes.
+8. Computes anomaly scores over moving windows and clusters high-score windows with DBSCAN.
+9. Selects a candidate anomaly location and explains it with GeoXAI.
 
 ## Main Tabs
 
-- `Map` - geographic map view of the survey and candidate area.
-- `Engineering Map` - UTM engineering view for points, clusters, and candidate estimate.
-- `Total Field` - magnetic total-field trace.
-- `VMD Modes` - selected VMD mode energy and decomposition view.
-- `Scores` - anomaly score, threshold, and hit windows.
-- `GeoXAI` - explanation of the candidate estimate and confidence factors.
+- `Data & Cleaning` - cleaning settings, cleaning maps (scatter, contour or web map; before or after cleaning), data tables and signal plots.
+- `Filter Lab` - preview, compare and apply filters (band-pass, high-pass, low-pass, moving average, Savitzky-Golay, linear detrend, VMD, upward/downward continuation, reduction to pole).
+- `Automated Anomaly Analysis` - finds anomalies automatically from the survey itself (no training data): VMD splits the signal into bands, robust statistics score each section of the track, DBSCAN groups high-scoring sections into candidates, and GeoXAI explains the result. Shows the magnetic field, VMD modes, anomaly scores and the GeoXAI explanation.
+- `Location Estimate` - location map and web map of the candidate anomaly, with exportable results.
 
-## Apply Filters Menu
+`File > Export Data...` lets you choose what to export: cleaned, synchronized and filtered data tables (CSV), the cleaning maps and open signal plots (PNG or PDF), and a georeferenced raster of a field (GeoTIFF, in the survey's UTM zone or WGS 84). GeoTIFF export needs the `rasterio` package.
 
-The top `Apply Filters` menu includes:
+## Analysis Parameters
 
-- `Upward Continuation` - applies an upward-continuation transform to the current BT field using the entered continuation height.
-- `Downward Continuation` - applies a downward-continuation transform to the current BT field using the entered continuation height.
-- `Reduction to Pole` - interpolates BT to a grid, estimates field direction from the survey date and location, and plots the RTP-transformed field.
-- `Variational Mode Decomposition` - decomposes the current BT trace, automatically selects anomaly-bearing modes, and redraws the map using the VMD-reconstructed BT field.
+The Automated Anomaly Analysis settings panel lets users adjust:
 
-## Parameters
-
-The left control panel lets users adjust:
-
-- Reference well latitude and longitude.
-- Known-reference or unknown-location mode.
-- Startup samples removed.
-- Spatial MAD filter.
-- Score window length.
-- Window step ratio.
+- Analysis input (cleaned total field or the current filtered field).
+- Optional reference latitude and longitude.
+- Score window length and window step ratio.
 - Threshold gamma.
-- DBSCAN epsilon distance.
-- DBSCAN minimum samples.
+- DBSCAN epsilon distance and minimum samples.
 
-After changing parameters, click `Update Results`.
+Cleaning settings (startup samples, spatial MAD multiplier, percentile fallback) are in the Data & Cleaning tab. Startup samples and the MAD multiplier are filled in automatically from each survey when it is imported; adjust them if needed and click `Update Cleaning Settings` to apply. `Restore suggested settings` returns to the survey's suggested values.
 
 ## Known-Reference And Unknown-Location Modes
 
-Use known-reference mode when the expected well coordinate is available. The app reports the candidate offset from that reference.
+Enter a reference latitude and longitude when the location of a known target is available. The app reports the candidate's offset from that reference.
 
-Use unknown-location mode when the well coordinate is not known. The app will still rank candidate clusters and provide a GeoXAI explanation based on the magnetic and spatial evidence.
+Leave the reference blank when no location is known. The app still ranks candidate clusters and provides a GeoXAI explanation based on the magnetic and spatial evidence.
 
 ## Sharing Notes
 
 For collaborators:
 
 1. Clone or download this repository.
-2. Install packages using `pip install -r requirements.txt`.
+2. Install packages using `python -m pip install -r requirements.txt`.
 3. Run `python GUI.py`.
-4. Import a survey workbook from local storage.
+4. Import a survey file from local storage.
 
 Do not upload private field survey files unless the project owner approves sharing those data.
 
@@ -131,6 +127,6 @@ If a package is missing, reinstall dependencies:
 python -m pip install -r requirements.txt
 ```
 
-If maps or web views do not display, make sure `PyQt6-WebEngine`, `folium`, and `branca` installed correctly.
+If maps or web views do not display, make sure `PyQt6-WebEngine`, `folium`, and `branca` installed correctly. Web-map backgrounds require internet access.
 
-If the app opens but no results appear, import a valid survey workbook from the `OrphaMag` tab.
+If the app opens but no results appear, import a valid survey file with `File > Import Data...`.

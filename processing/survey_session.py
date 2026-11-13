@@ -5,7 +5,7 @@ import hashlib
 from copy import deepcopy
 import numpy as np
 import pandas as pd
-import OrphanWellPipeline as ow
+from processing import data_analysis_pipeline as dap
 
 
 @dataclass
@@ -23,6 +23,12 @@ class SurveySession:
     mode_cache: dict = field(default_factory=dict)
     undo_states: list = field(default_factory=list, repr=False)
     redo_states: list = field(default_factory=list, repr=False)
+    # Data-based cleaning suggestion (see dap.suggest_cleaning_settings); computed on first use.
+    suggested_cleaning: dict | None = field(default=None, repr=False)
+    # Unit of the magnetic values as recorded (see processing.labels.MAG_UNITS); values are never converted.
+    field_unit: str = 'µT'
+    # How the coordinates were recorded: {'format': ..., 'epsg': ...} (see processing.coordinates.FORMATS).
+    coordinates: dict = field(default_factory=lambda: {'format': 'decimal_degrees'})
 
     def __post_init__(self):
         self.path = str(Path(self.path).resolve())
@@ -34,7 +40,7 @@ class SurveySession:
         if self.cleaning_key == key and not self.cleaned.empty:
             return False
         # Commit only after successful preprocessing; the raw streams stay intact.
-        cleaned, audit = ow.clean_survey(self.magnetometer, self.location, params)
+        cleaned, audit = dap.clean_survey(self.magnetometer, self.location, params)
         self.cleaned = cleaned.copy(deep=True)
         self.working = cleaned.copy(deep=True)
         self.audit = dict(audit)
@@ -88,13 +94,13 @@ class SurveySession:
         self.undo_states.append(self.field_state());self.restore_field(self.redo_states.pop());return True
 
     def modes_for(self, frame, params):
-        field_values = frame['Analysis_Field_uT'].to_numpy(dtype=float)
+        field_values = frame['Analysis_Field'].to_numpy(dtype=float)
         time_values = frame['Time (s)'].to_numpy(dtype=float)
         digest = hashlib.sha256(field_values.tobytes() + time_values.tobytes()).hexdigest()
         key = (digest, params.vmd_modes, params.vmd_alpha, params.max_selected_modes)
         if key not in self.mode_cache:
             if len(self.mode_cache) >= 4:
                 self.mode_cache.pop(next(iter(self.mode_cache)))
-            result = ow.run_vmd_modes(frame, params, field_column='Analysis_Field_uT')
+            result = dap.run_vmd_modes(frame, params, field_column='Analysis_Field')
             self.mode_cache[key] = result
         return self.mode_cache[key]

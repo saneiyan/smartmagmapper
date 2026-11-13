@@ -1,6 +1,7 @@
 """Inspectable VMD reconstruction, mode traces, ratios, and selection reasons."""
 import numpy as np
-from PlotTheme import light_figure
+from ui.theme import light_figure
+from processing import labels
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (QWidget,QVBoxLayout,QLabel,QTabWidget,QScrollArea,
@@ -76,7 +77,7 @@ class VMDPanel(QWidget):
         axes[0].legend(fontsize=8);axes[0].set_title('Input and selected-mode reconstruction (median baseline restored)')
         axes[1].plot(x,reconstructed,color=KEEP,lw=.8);axes[1].set_title('Filtered reconstruction')
         axes[2].plot(x,removed,color=EXCLUDE,lw=.8);axes[2].set_title('Removed difference: input − reconstruction')
-        for ax in axes:ax.grid(alpha=.2);ax.set_ylabel('µT')
+        for ax in axes:ax.grid(alpha=.2);ax.set_ylabel(labels.display_unit())
         axes[-1].set_xlabel(label);light_figure(self.reconstruction);self.reconstruction_canvas.draw_idle()
         self.traces.clear()
         self.traces.set_size_inches(12,max(7,len(modes)*1.5))
@@ -87,7 +88,7 @@ class VMDPanel(QWidget):
             ax=self.traces.add_subplot(gs[index,0])
             ax.plot(x,modes[mode-1],color=color,lw=.7)
             ax.set_title(f"Mode {mode} | ratio {row['energy_ratio']:.4f} | "+('KEEP' if keep else 'EXCLUDED'),fontsize=9,loc='left')
-            ax.set_ylabel('µT',fontsize=8);ax.tick_params(labelsize=7);ax.grid(alpha=.15)
+            ax.set_ylabel(labels.display_unit(),fontsize=8);ax.tick_params(labelsize=7);ax.grid(alpha=.15)
             if index==len(metrics)-1:ax.set_xlabel(label)
         bars=self.traces.add_subplot(gs[:,1])
         colors=[KEEP if int(m) in selected else EXCLUDE for m in metrics['mode']]

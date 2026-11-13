@@ -44,6 +44,7 @@ PyQt6_sip==13.11.1
 python-dateutil==2.8.2
 pytz==2023.3
 PyYAML==6.0.2
+rasterio==1.4.3  # GeoTIFF export; added after the tested environment was frozen
 requests==2.32.3
 scikit-learn==1.9.1
 scipy==1.17.1

@@ -1,14 +1,14 @@
 """Project lifecycle, filter history and application-wide settings in one menu layer."""
 from pathlib import Path
-from copy import deepcopy
 from datetime import datetime,timezone
-import uuid,weakref,math
+import uuid,weakref,math,zipfile,json
 from PyQt6.QtCore import QObject,QTimer,QSettings,QStandardPaths,QEvent,QSignalBlocker,Qt
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (QApplication,QDialog,QVBoxLayout,QHBoxLayout,QFormLayout,QLabel,QLineEdit,QTextEdit,QSpinBox,QCheckBox,QPushButton,QDialogButtonBox,QFileDialog,QMessageBox,QListWidget,QTableView)
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-import ProjectIO
-import TableModel
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg,NavigationToolbar2QT
+from processing import project_io as ProjectIO
+from processing import labels, coordinates as coords
+from ui import table_model as TableModel
 
 UNTITLED='Untitled survey project'
 
@@ -17,7 +17,7 @@ def project_name_from_path(path):
     name=Path(path).name
     return name[:name.lower().index('.smmproj')] if '.smmproj' in name.lower() else Path(path).stem
 
-CONTROL_NAMES=['ow_startup_samples','ow_spatial_mad','ow_fallback_percentile','ow_window_length','ow_step_ratio','ow_gamma','ow_dbscan_eps','ow_min_samples']
+CONTROL_NAMES=['analysis_startup_samples','analysis_spatial_mad','analysis_fallback_percentile','analysis_window_length','analysis_step_ratio','analysis_gamma','analysis_dbscan_eps','analysis_min_samples']
 
 class ProjectTools(QObject):
     def __init__(self,window):
@@ -29,9 +29,9 @@ class ProjectTools(QObject):
         self.recovery_dir=Path(self.preferences.value('recovery_dir',str(Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))/'SmartMagMapper'/'Recovery')))
         TableModel.DISPLAY_PRECISION=self.precision
         self.build_menus()
-        for name in CONTROL_NAMES:getattr(window,name).valueChanged.connect(self.changed)
-        window.ow_input.currentIndexChanged.connect(self.changed)
-        for edit in [window.ow_well_lat,window.ow_well_lon]:edit.textChanged.connect(self.changed)
+        for name in CONTROL_NAMES:self.control(name).valueChanged.connect(self.changed)
+        window.analysis_input.currentIndexChanged.connect(self.changed)
+        for edit in [window.analysis_reference_lat,window.analysis_reference_lon]:edit.textChanged.connect(self.changed)
         window.select_file.currentIndexChanged.connect(self.update_actions)
         for tabs in [window.tabs,window.data_workspace.tabs,window.location_views]:tabs.currentChanged.connect(self.update_actions)
         self.timer=QTimer(self);self.timer.timeout.connect(self.autosave);self.timer.start(self.interval*60000)
@@ -53,10 +53,10 @@ class ProjectTools(QObject):
         self.action(w.file_menu,'Save Project As...',lambda:self.save_project(save_as=True),'Ctrl+Shift+S')
         w.file_menu.addSeparator()
         self.import_action=self.action(w.file_menu,'Import Data...',w.import_data_action,'Ctrl+Shift+I')
-        self.data_export=self.action(w.file_menu,'Export Cleaned Survey...',w.export_dialog)
+        self.data_export=self.action(w.file_menu,'Export Data...',w.export_dialog)
         w.file_menu.addSeparator()
         self.filter_export=self.action(w.file_menu,'Export Current Filter Preview...',lambda:w.filters_workspace.export())
-        self.analysis_export=self.action(w.file_menu,'Export Analysis Results...',w.export_orphan_results)
+        self.analysis_export=self.action(w.file_menu,'Export Analysis Results...',w.export_analysis_results)
         w.file_menu.aboutToShow.connect(self.update_actions)
         w.file_menu.addSeparator()
         self.properties_action=self.action(w.file_menu,'Current Project Properties...',self.properties)
@@ -73,7 +73,11 @@ class ProjectTools(QObject):
         self.measure_action=self.action(tools,'Measure Map Distance',self.enable_measure,'Ctrl+M',checkable=True)
         self.action(tools,'Settings...',self.settings)
         # The existing analysis button uses this same global action; hide its duplicate control.
-        w.ow_apply_button.hide();w.ow_export_button.hide()
+        w.analysis_apply_button.hide();w.analysis_export_button.hide()
+
+    def data_imported(self):
+        """Importing a survey with no project open starts an untitled, unsaved project."""
+        self.project_active=True;self.changed()
 
     def changed(self,*_):
         if self.loading:return
@@ -81,14 +85,16 @@ class ProjectTools(QObject):
 
     def update_actions(self,*_):
         session=self.w.active_session()
-        # Project-level actions stay disabled until New Project or Open Project succeeds.
-        for action in [self.import_action,self.properties_action,self.backups_action]:action.setEnabled(self.project_active)
+        # Import Data is always available
+        self.import_action.setEnabled(True)
+        #project-level actions wait for a project
+        for action in [self.properties_action,self.backups_action]:action.setEnabled(self.project_active)
         self.undo_action.setEnabled(session is not None and bool(session.undo_states))
         self.redo_action.setEnabled(session is not None and bool(session.redo_states))
         self.recalculate_action.setEnabled(session is not None)
         if self.data_export:self.data_export.setEnabled(session is not None)
         if self.filter_export:self.filter_export.setEnabled(self.w.filters_workspace.result is not None)
-        if self.analysis_export:self.analysis_export.setEnabled(self.w.ow_annotated_df is not None)
+        if self.analysis_export:self.analysis_export.setEnabled(self.w.analysis_annotated_df is not None)
         eligible=session is not None and bool(self.measure_targets())
         self.measure_action.setEnabled(eligible)
         if not eligible:
@@ -98,12 +104,23 @@ class ProjectTools(QObject):
         title=self.metadata['title']+(' (recovered)' if self.recovered else '')+(' *' if self.dirty else '')
         self.w.setWindowTitle('SmartMagMapper | Project Workspace'+(' | '+title if self.project_active else ''))
 
+    def control(self,name):
+        """Widget for a saved setting name (the cleaning boxes belong to the Data & Cleaning tab)."""
+        workspace=self.w.data_workspace
+        cleaning={'analysis_startup_samples':workspace.startup_samples,'analysis_spatial_mad':workspace.spatial_mad,
+                  'analysis_fallback_percentile':workspace.fallback_percentile}
+        return cleaning.get(name) or getattr(self.w,name)
+
     def state(self):
         w=self.w
-        params={name:getattr(w,name).value() for name in CONTROL_NAMES}
-        params.update(well_lat=w.ow_well_lat.text(),well_lon=w.ow_well_lon.text(),analysis_input=w.ow_input.currentIndex(),main_tab=w.tabs.currentIndex(),signal_column=w.data_workspace.column_picker.currentData())
+        params={name:self.control(name).value() for name in CONTROL_NAMES}
+        params.update(reference_lat=w.analysis_reference_lat.text(),reference_lon=w.analysis_reference_lon.text(),analysis_input=w.analysis_input.currentIndex(),main_tab=w.tabs.currentIndex(),signal_column=w.data_workspace.column_picker.currentData(),
+                      map_colormap=w.data_workspace.map_colors.currentData(),location_colormap=w.location_colors.currentData(),
+                      filter_colormap=w.filters_workspace.map_colors.currentData(),
+                      location_map_type=w.location_map_type.currentText())
         lab=w.filters_workspace
-        params['filter_form']={'method':lab.method.currentText(),'field':lab.field.currentText(),'domain':lab.domain.currentText(),'parameters':lab.active_parameters()}
+        params['filter_form']={'method':lab.method.currentText(),'field':lab.field.currentData(),'domain':lab.domain.currentText(),'parameters':lab.active_parameters()}
+        params['filter_view']={'before':lab.show_before.isChecked(),'difference':lab.show_difference.isChecked(),'plots':lab.plot_views.currentText()}
         params['comparison_next']=lab.comparisons.next_index
         params['comparison_checked']=lab.comparisons.visible_names()
         return params
@@ -130,38 +147,47 @@ class ProjectTools(QObject):
             self.w.statusBar().showMessage('Project saved: '+self.path.name);return True
         except Exception as exc:self.metadata['title']=previous_title;QMessageBox.warning(self.w,'Project Save',str(exc));return False
 
-    def confirm_replace(self):
+    def confirm_replace(self,action='replacing it'):
         if not self.dirty:return True
-        answer=QMessageBox.question(self.w,'Unsaved Project','Save this project before replacing it?',QMessageBox.StandardButton.Save|QMessageBox.StandardButton.Discard|QMessageBox.StandardButton.Cancel,QMessageBox.StandardButton.Save)
+        answer=QMessageBox.question(self.w,'Unsaved Project',f'Save this project before {action}?',QMessageBox.StandardButton.Save|QMessageBox.StandardButton.Discard|QMessageBox.StandardButton.Cancel,QMessageBox.StandardButton.Save)
         if answer==QMessageBox.StandardButton.Cancel:return False
         return self.save_project() if answer==QMessageBox.StandardButton.Save else True
 
     def select_survey_cleaning(self,session):
         if self.loading or session.cleaning_key is None:return
-        controls=[self.w.ow_startup_samples,self.w.ow_spatial_mad,self.w.ow_fallback_percentile]
-        blockers=[QSignalBlocker(control) for control in controls]
-        for control,value in zip(controls,session.cleaning_key):control.setValue(value)
-        del blockers
+        self.w.data_workspace.set_cleaning_values(*session.cleaning_key)
 
     def reset_workspace(self):
-        w=self.w;w.ow_update_timer.stop();w.ow_reload_timer.stop()
+        w=self.w;w.analysis_update_timer.stop();w.analysis_reload_timer.stop()
         w.select_file.blockSignals(True);w.select_file.clear();w.select_file.blockSignals(False)
         w.sessions=[];w.df_list=[];w.processed_dfs={};w.dialog_configs={};w.mag_gps_dfs={};w.active_dataset_index=None
-        w.current_df=w.df=w.ow_selected_dataset=None;w.ow_file_path=None;w.ow_selected_dataset_index=None;w.active_filters=[]
-        w.plot_tabs.clear();w.data_workspace.raw=None;w.data_workspace.raw_session=None;w.data_workspace.column_picker.clear()
-        for table in [w.data,w.data_workspace.raw_table,*w.data_workspace.stream_tables]:table.setModel(None)
+        w.current_df=w.df=w.analysis_selected_dataset=None;w.analysis_file_path=None;w.analysis_selected_dataset_index=None;w.active_filters=[]
+        w.data_workspace.plot_tabs.clear();w.data_workspace.raw=None;w.data_workspace.raw_session=None;w.data_workspace.column_picker.clear()
+        for table in [w.data_workspace.cleaned_table,w.data_workspace.raw_table,*w.data_workspace.stream_tables]:table.setModel(None)
         for figure,canvas in [(w.figure,w.canvas),(w.data_workspace.figure,w.data_workspace.canvas)]:figure.clear();canvas.draw_idle()
-        w.filters_workspace.session_changed();w.clear_orphan_results('No survey loaded.');w.data_workspace.status.hide();w.data_workspace.cleaning_details.setText('Import a survey to inspect cleaning.')
-        w.shared_field_label.setText('Current field: No survey');w.ow_dataset_label.setText('Active survey: None');w.ow_input_label.setText('Analysis input: No survey')
+        w.filters_workspace.session_changed();w.clear_analysis_results('No survey loaded.');w.data_workspace.status.hide();w.data_workspace.cleaning_details.setText('Import a survey to inspect cleaning.')
+        labels.set_display_unit(labels.DEFAULT_UNIT);w.refresh_unit_labels()
+        w.shared_field_label.setText('Current field: No survey');w.analysis_dataset_label.setText('Active survey: None');w.analysis_input_label.setText('Analysis input: No survey')
         w.residual_cache=None;w.residual_date=None;w.map_vmin=w.map_vmax=w.vmin=w.vmax=None
         w.tabs.setCurrentIndex(0)
 
+    @staticmethod
+    def current_setting_names(values):
+        """Projects saved by earlier versions use the old names (ow_*, well_lat/well_lon); translate them."""
+        renamed={'well_lat':'reference_lat','well_lon':'reference_lon'}
+        out={}
+        for key,value in values.items():
+            key=renamed.get(key,'analysis_'+key[3:] if key.startswith('ow_') else key)
+            out.setdefault(key,value)
+        return out
+
     def set_parameters(self,values):
-        w=self.w;widgets=[getattr(w,name) for name in CONTROL_NAMES]+[w.ow_well_lat,w.ow_well_lon,w.ow_input]
+        values=self.current_setting_names(values)
+        w=self.w;widgets=[self.control(name) for name in CONTROL_NAMES]+[w.analysis_reference_lat,w.analysis_reference_lon,w.analysis_input]
         blockers=[QSignalBlocker(widget) for widget in widgets]
         for name in CONTROL_NAMES:
-            if name in values:getattr(w,name).setValue(values[name])
-        w.ow_well_lat.setText(values.get('well_lat',''));w.ow_well_lon.setText(values.get('well_lon',''));w.ow_input.setCurrentIndex(values.get('analysis_input',0))
+            if name in values:self.control(name).setValue(values[name])
+        w.analysis_reference_lat.setText(values.get('reference_lat',''));w.analysis_reference_lon.setText(values.get('reference_lon',''));w.analysis_input.setCurrentIndex(values.get('analysis_input',0))
         del blockers
 
     def new_project(self):
@@ -196,14 +222,26 @@ class ProjectTools(QObject):
             c.library.blockSignals(True)
             for i in range(c.library.count()):c.library.item(i).setCheckState(Qt.CheckState.Checked if c.library.item(i).data(Qt.ItemDataRole.UserRole) in selected else Qt.CheckState.Unchecked)
             c.library.blockSignals(False);c.draw()
+            c.message.setText(f'Restored {len(comparisons)} stored filter result(s) from the project.' if comparisons else
+                              'No stored results yet. Preview a filter, then click Store filter results for comparison.')
             form=manifest['settings'].get('filter_form',{});lab=w.filters_workspace
+            view=manifest['settings'].get('filter_view',{})  # older projects get the defaults (After map only)
+            lab.show_before.setChecked(view.get('before',False));lab.show_difference.setChecked(view.get('difference',False))
+            lab.plot_views.setCurrentText(view.get('plots','Map only') if lab.plot_views.findText(view.get('plots',''))>=0 else 'Map only')
             if form:
-                lab.method.setCurrentText(form['method']);lab.field.setCurrentText(form['field']);lab.domain.setCurrentText(form['domain'])
+                lab.method.setCurrentText(form['method']);lab.field.setCurrentIndex(max(0,lab.field.findData(form['field']) if lab.field.findData(form['field'])>=0 else lab.field.findText(form['field'])));lab.domain.setCurrentText(form['domain'])
                 for key,control in [('window',lab.window_length),('low',lab.low),('high',lab.high),('k_modes',lab.k),('alpha',lab.alpha),('cell_size',lab.cell),('height',lab.height),('max_gain',lab.gain),('inclination',lab.inc),('declination',lab.dec)]:
                     if key in form['parameters']:control.setValue(form['parameters'][key])
             signal=manifest['settings'].get('signal_column');picker=w.data_workspace.column_picker
             index=picker.findData(signal)
             if index>=0:picker.setCurrentIndex(index)
+            # Colour scales and Location Estimate map type (older projects keep the defaults).
+            for combo,key in [(w.data_workspace.map_colors,'map_colormap'),(w.location_colors,'location_colormap'),
+                              (w.filters_workspace.map_colors,'filter_colormap')]:
+                index=combo.findData(manifest['settings'].get(key))
+                if index>=0:combo.setCurrentIndex(index)
+            index=w.location_map_type.findText(manifest['settings'].get('location_map_type',''))
+            if index>=0:w.location_map_type.setCurrentIndex(index)
             w.tabs.setCurrentIndex(manifest['settings'].get('main_tab',0))
             self.metadata=manifest['metadata'];self.recovered=recovery
             # Projects saved without a title are shown by their file name (recovery files have no meaningful name).
@@ -225,13 +263,13 @@ class ProjectTools(QObject):
     def recalculate(self):
         session=self.w.active_session()
         if session is None:return
-        self.w.ow_update_timer.stop();self.w.ow_reload_timer.stop()
+        self.w.analysis_update_timer.stop();self.w.analysis_reload_timer.stop()
         try:
-            changed=session.ensure_cleaned(self.w.orphan_params())
+            changed=session.ensure_cleaned(self.w.analysis_params())
             session.mode_cache.clear()
             if changed:self.w.activate_survey(self.w.active_dataset_index)
-            else:self.w.run_orphan_analysis()
-            if self.w.ow_summary_data:self.w.statusBar().showMessage('Analysis recalculated from the selected input.')
+            else:self.w.run_anomaly_analysis()
+            if self.w.analysis_summary_data:self.w.statusBar().showMessage('Analysis recalculated from the selected input.')
         except Exception as exc:QMessageBox.warning(self.w,'Recalculate Analysis',str(exc))
         self.changed()
 
@@ -239,8 +277,10 @@ class ProjectTools(QObject):
         dialog=QDialog(self.w);dialog.setWindowTitle('Project Properties');layout=QVBoxLayout(dialog);form=QFormLayout()
         title=QLineEdit(self.metadata['title']);author=QLineEdit(self.metadata.get('author',''));notes=QTextEdit(self.metadata.get('notes',''))
         form.addRow('Project Title',title);form.addRow('Author',author);form.addRow('Notes',notes)
-        form.addRow('Units',QLabel('Magnetic field: microtesla (uT) | Position: metres | Time: seconds'))
         session=self.w.active_session()
+        unit=session.field_unit if session is not None else labels.display_unit()
+        coordinates=coords.FORMATS.get((session.coordinates if session is not None else {}).get('format','decimal_degrees'),'Decimal degrees')
+        form.addRow('Units',QLabel(f'Magnetic field: {labels.UNIT_NAMES.get(unit,unit)} ({unit}) | Coordinates: {coordinates} | Position: metres | Time: seconds'))
         form.addRow('Surveys',QLabel(str(len(self.w.sessions))))
         form.addRow('Coordinate System',QLabel('UTM EPSG '+str(int(session.cleaned['UTM_EPSG'].iloc[0])) if session is not None else 'Determined when a survey is imported'))
         layout.addLayout(form);buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel);buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);layout.addWidget(buttons)
@@ -258,7 +298,6 @@ class ProjectTools(QObject):
         dialog=QDialog(self.w);dialog.setWindowTitle(title);layout=QVBoxLayout(dialog);items=QListWidget();layout.addWidget(items)
         for path in paths:
             try:
-                import zipfile,json
                 with zipfile.ZipFile(path) as archive:data=json.loads(archive.read('project.json'))
                 items.addItem(data['metadata']['title']+' | '+data['saved_utc']+' | '+path.name)
             except Exception:items.addItem(path.name)
@@ -332,7 +371,7 @@ class ProjectTools(QObject):
     def measure_targets(self):
         w=self.w
         if w.tabs.currentWidget() is w.data_workspace and w.data_workspace.tabs.currentIndex()==0:return w.data_workspace.figure.axes[:1] if w.data_workspace.canvas.isVisible() else []
-        if w.tabs.currentIndex()==3 and w.location_views.currentIndex()==0:return w.ow_cluster_figure.axes[:1]
+        if w.tabs.currentIndex()==3 and w.location_views.currentIndex()==0:return w.analysis_cluster_figure.axes[:1]
         return []
 
     def enable_measure(self,checked):
@@ -345,7 +384,6 @@ class ProjectTools(QObject):
             for canvas in self.w.findChildren(FigureCanvasQTAgg):
                 if canvas.isVisible():canvas.draw_idle()
         if checked:
-            from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
             for toolbar in self.w.findChildren(NavigationToolbar2QT):
                 if toolbar.isVisible():
                     if str(toolbar.mode).startswith('pan'):toolbar.pan()
@@ -364,7 +402,6 @@ class ProjectTools(QObject):
 
     def reset_plot(self):
         # Reset the currently visible interactive figure, not hidden workspaces.
-        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
         for toolbar in self.w.findChildren(NavigationToolbar2QT):
             if toolbar.isVisible():toolbar.home();return
         for canvas in self.w.findChildren(FigureCanvasQTAgg):

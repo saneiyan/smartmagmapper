@@ -16,4 +16,5 @@ branca
 ppigrf
 harmonica
 xarray
+rasterio
 xlrd

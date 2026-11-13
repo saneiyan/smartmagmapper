@@ -5,9 +5,9 @@ import io,json,os,shutil,zipfile,tempfile,uuid
 from datetime import datetime,timezone
 import numpy as np
 import pandas as pd
-import OrphanWellPipeline as ow
-from SurveySession import SurveySession
-from ScientificFilters import FilterResult
+from processing import data_analysis_pipeline as dap
+from processing.survey_session import SurveySession
+from processing.scientific_filters import FilterResult
 
 FORMAT='SmartMagMapper project'
 VERSION=1
@@ -18,7 +18,20 @@ def _json(value):
     raise TypeError(type(value).__name__)
 
 def _csv(z,name,frame):z.writestr(name,frame.to_csv(index=False,float_format='%.17g'))
-def _read(z,name):return pd.read_csv(io.BytesIO(z.read(name)),float_precision='round_trip')
+def _exact_read_options():
+    """read_csv options that read '%.17g' floats back bit-for-bit (project checks need exact values).
+
+    pandas < 3.1 needs float_precision='round_trip'; from pandas 3.1 the default parser is exact and that
+    option is deprecated. Test the installed pandas once instead of relying on its version number.
+    """
+    rng=np.random.default_rng(0)
+    sample=np.concatenate([rng.normal(50,5,1000),rng.uniform(-1e7,1e7,500),rng.standard_normal(500)*1e-9])
+    text=pd.DataFrame({'v':sample}).to_csv(index=False,float_format='%.17g')
+    if np.array_equal(pd.read_csv(io.StringIO(text))['v'].to_numpy(),sample):return {}
+    return {'float_precision':'round_trip'}
+
+_READ_OPTIONS=_exact_read_options()
+def _read(z,name):return pd.read_csv(io.BytesIO(z.read(name)),**_READ_OPTIONS)
 
 def write_project(path,sessions,active,settings,metadata,comparisons=None,backup=True):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
@@ -29,7 +42,8 @@ def write_project(path,sessions,active,settings,metadata,comparisons=None,backup
             for i,session in enumerate(sessions):
                 prefix=f'surveys/{i}/'
                 for label,frame in [('mag',session.magnetometer),('gps',session.location),('cleaned',session.cleaned),('working',session.working)]:_csv(z,prefix+label+'.csv',frame)
-                manifest['surveys'].append({'source':session.path,'cleaning_key':session.cleaning_key,'filters':session.filters,'history':session.filter_history,'audit':session.audit})
+                manifest['surveys'].append({'source':session.path,'cleaning_key':session.cleaning_key,'filters':session.filters,'history':session.filter_history,'audit':session.audit,
+                                           'field_unit':session.field_unit,'coordinates':session.coordinates})
             for index,(name,item) in enumerate((comparisons or {}).items()):
                 result=item['result'];prefix=f'comparisons/{index}/';arrays={}
                 for key in ['before','after','axis','modes','mode_axis','mode_signal']:
@@ -66,14 +80,20 @@ def read_project(path):
             prefix=f'surveys/{i}/';mag=_read(z,prefix+'mag.csv');gps=_read(z,prefix+'gps.csv')
             key=entry['cleaning_key']
             if len(key)!=3:raise ValueError('Invalid cleaning settings.')
-            params=ow.OrphanWellParams(startup_samples=int(key[0]),spatial_mad_multiplier=float(key[1]),spatial_fallback_percentile=float(key[2]))
-            session=SurveySession(entry['source'],mag,gps);session.ensure_cleaned(params)
-            archived=_read(z,prefix+'cleaned.csv');working=_read(z,prefix+'working.csv')
+            params=dap.AnalysisParams(startup_samples=int(key[0]),spatial_mad_multiplier=float(key[1]),spatial_fallback_percentile=float(key[2]))
+            # older projects have no unit or coordinate entry: their values are in µT and decimal degrees
+            session=SurveySession(entry['source'],mag,gps,field_unit=entry.get('field_unit','µT'),
+                                  coordinates=entry.get('coordinates') or {'format':'decimal_degrees'})
+            session.ensure_cleaned(params)
+            # Projects saved by earlier versions carry duplicate columns; drop them and match today's column order.
+            archived=dap.drop_legacy_aliases(_read(z,prefix+'cleaned.csv'));working=dap.drop_legacy_aliases(_read(z,prefix+'working.csv'))
+            if set(archived.columns)==set(session.cleaned.columns):archived=archived.reindex(columns=list(session.cleaned.columns))
+            working=working.reindex(columns=[c for c in archived.columns if c in working]+[c for c in working.columns if c not in archived.columns])
             columns=['Time (s)','Easting (m)','Northing (m)','BT']
             if len(archived)!=len(session.cleaned) or not np.allclose(archived[columns],session.cleaned[columns],rtol=1e-10,atol=1e-8):raise ValueError('The archived baseline does not match its raw data and cleaning settings.')
             if len(working)!=len(archived) or not np.array_equal(working['Time (s)'],archived['Time (s)']) or not np.isfinite(working['BT']).all():raise ValueError('Invalid current-field data in project.')
             for column in archived:
-                if column in ['BT','Filtered_Field_uT']:continue
+                if column=='BT':continue
                 if column not in working or not working[column].equals(archived[column]):raise ValueError('A saved filter changed the source survey columns.')
             session.cleaned=archived;session.working=working;session.filters=list(entry['filters']);session.filter_history=deepcopy(entry['history']);session.revision+=1
             sessions.append(session)
