@@ -32,8 +32,8 @@ class FilterComparison(QWidget):
         self.library.setToolTip('Tick to show in the comparison plot (up to three).\nClick a row to select it for the buttons below.')
         self.library.itemChanged.connect(self.library_changed);self.library.currentItemChanged.connect(self.selection_changed)
         panel.addWidget(self.library)
-        self.use=QPushButton('Store filter result for anomaly analysis')
-        self.use.setToolTip('Use the selected stored result as the filtered field for anomaly analysis (the current field).')
+        self.use=QPushButton('Apply Filter Result')
+        self.use.setToolTip('Apply the selected stored result to the working magnetic data.')
         self.use.clicked.connect(self.use_saved);panel.addWidget(self.use)
         self.clear=QPushButton('Delete selected');self.clear.setToolTip('Delete the selected stored result.');self.clear.clicked.connect(self.clear_slot)
         panel.addWidget(self.clear)
@@ -220,7 +220,7 @@ class FilterComparison(QWidget):
             if r.modes is not None:self.lab.vmd.set_data(r.mode_axis,r.mode_signal,r.modes,r.metrics,r.selected,r.axis_label)
         # Apply uses recorded settings rather than whatever is currently selected in the form.
         ok=self.lab.apply()
-        if ok:self.notify(f'Stored result {name} is now the filter result for anomaly analysis (the current field).')
+        if ok:self.notify(f'Stored result {name} applied to the working magnetic data.')
         return ok
 
     def export_saved(self):
