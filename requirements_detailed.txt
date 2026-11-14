@@ -61,3 +61,6 @@ xlrd==2.0.2
 xrft==1.0.1
 xyzservices==2026.3.0
 zipp==4.1.0
+shap==0.46.0
+slicer==0.0.8
+tqdm==4.66.5
