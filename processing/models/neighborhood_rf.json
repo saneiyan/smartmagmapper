@@ -1,0 +1,69 @@
+{
+  "model_id": "neighborhood_rf_feature_schema_v1_seed42",
+  "feature_schema": "neighborhood_features_v1",
+  "feature_names": [
+    "e_m",
+    "n_m",
+    "score",
+    "threshold_margin",
+    "contrib_mode1",
+    "contrib_mode2",
+    "nearest_centroid_distance_m",
+    "nearest_centroid_radius_m",
+    "nearest_centroid_peak_score"
+  ],
+  "target_class": "selected neighborhood",
+  "classes": [
+    "background",
+    "secondary neighborhood",
+    "selected neighborhood"
+  ],
+  "coordinate_epsg": 32618,
+  "coordinate_units": "meters",
+  "coordinate_bounds": {
+    "e_m": [
+      431785.247506628,
+      431927.8288638355
+    ],
+    "n_m": [
+      4665932.231332456,
+      4666023.912892126
+    ]
+  },
+  "versions": {
+    "python": "3.11.9",
+    "numpy": "1.26.4",
+    "scikit_learn": "1.9.1",
+    "shap": "0.46.0",
+    "joblib": "1.4.2"
+  },
+  "training_rows": 45413,
+  "test_rows": 11354,
+  "surveys": 60,
+  "split": "Stratified random scored-window split: 80% train / 20% test, seed 42. Not a survey-held-out or independent-site evaluation.",
+  "labels": "Pipeline-derived neighborhood assignments; not independently verified well presence.",
+  "metrics": {
+    "accuracy": 0.9991192531266514,
+    "balanced_accuracy": 0.9922557788505918,
+    "macro_f1": 0.9953937647794086,
+    "weighted_f1": 0.9991194727632197
+  },
+  "reference_explanation_rows": 2000,
+  "reference_explanation_scope": "Sample of held-out scored windows; selected-neighborhood class; mean absolute SHAP.",
+  "shap_output": "Random-forest class probability output; not well-existence probability.",
+  "feature_mapping": "First/second retained mode per survey; absent second mode is zero; missing actual inputs rejected.",
+  "changes_from_located_research_script": [
+    "Uses each survey's recorded retained modes, rather than assuming mode IDs 2 and 3.",
+    "Keeps all valid windows; no 50000-row class subsampling.",
+    "Computes the selected-class global summary on held-out windows; also exports the across-class summary.",
+    "Saves the fitted forest with schema and provenance."
+  ],
+  "paper_metrics_reproduced": false,
+  "source_sha256": {
+    "score_points_all.csv": "04c09e86f13119f6498a770a362765d3d456844ac9475b9d0988a01343a887df",
+    "cluster_results_all.csv": "ef20bced751036ec8673c493628745c710e4a9ca654de6f66342bc5136150a44",
+    "survey_summary.csv": "1845e133d4778edba30438ddedee74bab04f9cea88d40a23410b37cf3e3831eb"
+  },
+  "source_summary_directory": "C:\\Users\\nimri\\OneDrive\\Desktop\\Retreived OW\\Orphan Well Data\\Butkowsky 1A Surveys 10_09_25\\processed\\gen ai sim\\vmdanomaly output\\summaries",
+  "model_sha256": "7ea07320d5ae7a580a72845cf607dde31c2a221ddc75b639d6819c81e268b72b"
+}
