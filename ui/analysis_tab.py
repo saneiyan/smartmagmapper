@@ -1,7 +1,24 @@
 """Automated Anomaly Analysis tab: settings, reference location, running the analysis and its plots."""
 from processing import labels
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QLabel, QWidget, QPushButton, QVBoxLayout, QLineEdit, QComboBox, QTabWidget, QGroupBox, QFormLayout, QDoubleSpinBox, QSpinBox, QTextEdit, QSplitter, QScrollArea
+from PyQt6.QtWidgets import (
+    QLabel,
+    QWidget,
+    QPushButton,
+    QHBoxLayout,
+    QVBoxLayout,
+    QLineEdit,
+    QComboBox,
+    QTabBar,
+    QTabWidget,
+    QGroupBox,
+    QFormLayout,
+    QDoubleSpinBox,
+    QSpinBox,
+    QTextEdit,
+    QSplitter,
+    QScrollArea,
+)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -9,6 +26,7 @@ from matplotlib.figure import Figure
 from pathlib import Path
 from ui.theme import panel_toggle, TabArrows
 from ui.vmd_panel import VMDPanel
+from ui.xai_help import FEATURE_HELP, show_picked_feature
 from processing import data_analysis_pipeline as dap
 from processing import geoxai_interpreter as gx
 import json
@@ -258,7 +276,78 @@ class AnalysisTabMixin:
         geoxai_layout = QVBoxLayout(geoxai_page)
         geoxai_layout.setContentsMargins(12, 12, 12, 12)
         geoxai_layout.setSpacing(10)
+
+        xai_controls = QHBoxLayout()
+        xai_controls.addWidget(QLabel('Explanation'))
+
+        self.xai_view = QComboBox()
+        self.xai_view.addItems([
+            'Global: survey overview',
+            'Local: selected window',
+        ])
+        self.xai_view.setToolTip(
+            'Global summarizes the survey. '
+            'Local explains one actual scored window.'
+        )
+        xai_controls.addWidget(self.xai_view)
+
+        xai_controls.addWidget(QLabel('Window'))
+        self.xai_window = QSpinBox()
+        self.xai_window.setRange(1, 1)
+        self.xai_window.setKeyboardTracking(False)
+        self.xai_window.setEnabled(False)
+        self.xai_window.setToolTip(
+            'Choose a scored window, or use Choose on score plot.'
+        )
+        xai_controls.addWidget(self.xai_window)
+
+        self.xai_window_label = QLabel(
+            'Run analysis to select a window.'
+        )
+        self.xai_window_label.setWordWrap(True)
+
+        self.xai_choose_score = QPushButton('Choose on score plot')
+        self.xai_choose_score.clicked.connect(
+            self.arm_xai_score_selection
+        )
+        self.xai_choose_score.setEnabled(False)
+        xai_controls.addWidget(self.xai_choose_score)
+        xai_controls.addStretch(1)
+
+        geoxai_layout.addLayout(xai_controls)
+        geoxai_layout.addWidget(self.xai_window_label)
+
+        self.xai_selection_guide = QLabel(
+            'For a local explanation, choose Local, then select a '
+            'window number or click Choose on score plot.'
+        )
+        self.xai_selection_guide.setWordWrap(True)
+        geoxai_layout.addWidget(self.xai_selection_guide)
+
+        self.xai_view.currentIndexChanged.connect(
+            self.render_analysis_geoxai
+        )
+        self.xai_window.valueChanged.connect(
+            self.render_analysis_geoxai
+        )
+        self.analysis_score_canvas.mpl_connect(
+            'button_press_event',
+            self.select_xai_window_on_score,
+        )
+        self.analysis_geoxai_canvas.mpl_connect(
+            'pick_event',
+            lambda event: show_picked_feature(self, event),
+        )
+
         geoxai_layout.addWidget(self.analysis_geoxai_text)
+
+        self.xai_chart_view = QTabBar()
+        self.xai_chart_view.addTab('SHAP explanation')
+        self.xai_chart_view.addTab('Cluster evidence')
+        self.xai_chart_view.currentChanged.connect(
+            self.render_analysis_geoxai
+        )
+        geoxai_layout.addWidget(self.xai_chart_view)
         geoxai_layout.addWidget(self.analysis_geoxai_canvas)
 
         self.analysis_visual_tabs.addTab(self.analysis_web_map, 'Web Map')
@@ -595,6 +684,7 @@ class AnalysisTabMixin:
     def refresh_analysis_geoxai(self, clean_df, score_points, clusters, summary):
         if not hasattr(self, 'analysis_geoxai_text'):
             return
+
         report = gx.explain_candidate(
             clean_df,
             score_points,
@@ -602,44 +692,401 @@ class AnalysisTabMixin:
             summary,
             reference_known='candidate_distance_to_reference_m' in summary,
         )
-        self.analysis_geoxai_report=report
-        self.analysis_geoxai_text.setPlainText(report.narrative)
+
+        self.analysis_geoxai_report = report
+        self._xai_score_points = score_points.copy(deep=True)
+
+        self.xai_window.blockSignals(True)
+        self.xai_window.setRange(1, max(1, len(score_points)))
+
+        initial = 0
+
+        if not report.features.empty and not clusters.empty:
+            chosen = clusters.loc[
+                clusters['selected_by_support_compactness'].astype(bool)
+            ]
+
+            if len(chosen) == 1:
+                selected = chosen.iloc[0]
+
+                positions = score_points[
+                    ['e_m', 'n_m']
+                ].to_numpy(dtype=float)
+
+                distances = (
+                    (positions[:, 0] - selected['centroid_e_m']) ** 2
+                    + (positions[:, 1] - selected['centroid_n_m']) ** 2
+                )
+
+                members = (
+                    score_points['cluster_label'].to_numpy()
+                    == selected['cluster_label']
+                )
+
+                distances[~members] = float('inf')
+                initial = int(distances.argmin())
+
+        self.xai_window.setValue(initial + 1)
+        self.xai_window.blockSignals(False)
+
+        self.render_analysis_geoxai()
+
+    def render_analysis_geoxai(self, *_):
+        report = getattr(self, 'analysis_geoxai_report', None)
+        if report is None:
+            return
+
+        local = self.xai_view.currentIndex() == 1
+        ready = report.metadata.get('status') == 'available'
+
+        self.xai_window.setEnabled(local and ready)
+        self.xai_choose_score.setEnabled(local and ready)
+
+        position = self.xai_window.value() - 1
+        points = getattr(self, '_xai_score_points', None)
+
+        if points is not None and len(points) > position:
+            point = points.iloc[position]
+            margin = float(point['threshold_margin'])
+            status = (
+                'above' if margin > 0
+                else ('below' if margin < 0 else 'at')
+            )
+
+            cluster = point.get('cluster_label', -1)
+            cluster = float(cluster) if cluster is not None else -1.0
+            cluster_text = (
+                f'C{int(cluster)}'
+                if cluster == cluster and cluster >= 0
+                else 'no cluster'
+            )
+
+            self.xai_window_label.setText(
+                f"Anomaly score: {float(point['score']):.3f} "
+                f"({status} threshold by {abs(margin):.3f}) | "
+                f"Cluster: {cluster_text} | "
+                f"Time: {point['t_center_s']:.2f} s"
+            )
+
+        if (
+            local
+            and ready
+            and points is not None
+            and len(points) > position
+        ):
+            category = report.features[
+                'pipeline_neighborhood'
+            ].iloc[position]
+
+            self.xai_window_label.setText(
+                self.xai_window_label.text()
+                + f' | Category: {category}'
+            )
+
+        report.local_contributions = report.contributions.iloc[0:0].copy()
+        report.local_metadata = {}
+        report.metadata['displayed_view'] = 'local' if local else 'global'
+        narrative = report.narrative
+
+        if local and ready:
+            try:
+                table, scope = gx.explain_window(
+                    report.features,
+                    points,
+                    report.metadata['coordinate_epsg'],
+                    position,
+                )
+
+                report.local_contributions = table
+                report.local_metadata = scope
+
+                narrative = (
+                    f"Local SHAP | Window {scope['window_number']} | "
+                    f"Time {scope['t_center_s']:.2f} s\n"
+                    "Explained category: selected neighborhood | "
+                    f"Model prediction: {scope['predicted_class']}\n"
+                    f"Pipeline category: "
+                    f"{scope.get('pipeline_neighborhood', 'unavailable')}\n"
+                    f"Window position: Easting {scope['e_m']:.3f} m; "
+                    f"Northing {scope['n_m']:.3f} m.\n"
+                    f"Model base value {scope['base_value']:.4f} "
+                    f"+ signed contributions "
+                    f"{scope['sum_of_contributions']:+.4f} "
+                    f"= selected-neighborhood output "
+                    f"{scope['model_output']:.4f}.\n"
+                    "Teal contributions increase this category's model "
+                    "output; orange contributions decrease it. "
+                    "This explains a recorded window's classification, "
+                    "not a probability that a well exists."
+                )
+
+            except (
+                ValueError,
+                ImportError,
+                OSError,
+                KeyError,
+                AssertionError,
+            ) as exc:
+                report.local_metadata = {
+                    'status': 'unavailable',
+                    'reason': str(exc),
+                }
+                narrative = 'Local SHAP unavailable: ' + str(exc)
+
+        elif local:
+            narrative = 'Local SHAP unavailable. ' + report.narrative
+
+        self.analysis_geoxai_text.setPlainText(narrative)
+        report.display_narrative = narrative
 
         self.analysis_geoxai_figure.clear()
+
         if report.contributions.empty and report.cluster_scores.empty:
-            ax = self.analysis_geoxai_figure.add_subplot(111)
-            ax.text(0.5, 0.5, 'No GeoXAI evidence to plot', ha='center', va='center', transform=ax.transAxes)
-            ax.set_axis_off()
+            axis = self.analysis_geoxai_figure.add_subplot(111)
+            axis.text(
+                0.5,
+                0.5,
+                'No GeoXAI evidence to plot',
+                ha='center',
+                va='center',
+                transform=axis.transAxes,
+            )
+            axis.set_axis_off()
             self.analysis_geoxai_canvas.draw_idle()
             return
 
-        ax_factors, ax_clusters = self.analysis_geoxai_figure.subplots(1, 2)
-        if not report.contributions.empty:
-            contrib = report.contributions.sort_values('weighted_score', ascending=True)
-            ax_factors.barh(contrib['factor'], contrib['weighted_score'], color='#0F766E')
-            ax_factors.set_xlim(0, max(0.35, float(contrib['weighted_score'].max()) * 1.15))
-            ax_factors.set_title('Selected-candidate evidence', pad=12)
-            ax_factors.set_xlabel('Weighted GeoXAI contribution')
-            for index, value in enumerate(contrib['weighted_score']):
-                ax_factors.text(value + 0.005, index, f'{value:.2f}', va='center', fontsize=8)
-        else:
-            ax_factors.text(0.5, 0.5, 'No selected candidate', ha='center', va='center', transform=ax_factors.transAxes)
-        self.style_analysis_axis(ax_factors)
+        evidence_view = self.xai_chart_view.currentIndex() == 1
 
-        if not report.cluster_scores.empty:
-            scored = report.cluster_scores.sort_values('geo_xai_confidence', ascending=True)
-            labels = [f"C{int(v)}" for v in scored['cluster_label']]
-            colors = [
-                '#111827' if bool(v) else '#94A3B8'
-                for v in scored['selected_by_support_compactness'].astype(bool)
-            ]
-            ax_clusters.barh(labels, 100*scored['geo_xai_confidence'], color=colors)
-            ax_clusters.set_xlim(0, 100)
-            ax_clusters.set_title('Cluster Evidence Scores', pad=12)
-            ax_clusters.set_xlabel('XAI Evidence Score (0–100)')
-            for index, value in enumerate(scored['geo_xai_confidence']):
-                ax_clusters.text(100.0*float(value) + 1.5, index, f'{100.0 * float(value):.0f}', va='center', fontsize=8)
+        if evidence_view:
+            ax_support, ax_spread = (
+                self.analysis_geoxai_figure.subplots(1, 2)
+            )
+            evidence = report.cluster_scores.sort_values('cluster_label')
+
+            if not evidence.empty:
+                cluster_labels = [
+                    f'C{int(value)}'
+                    for value in evidence['cluster_label']
+                ]
+                colors = [
+                    '#0F766E' if bool(value) else '#94A3B8'
+                    for value in evidence[
+                        'selected_by_support_compactness'
+                    ]
+                ]
+
+                bars = ax_support.barh(
+                    cluster_labels,
+                    evidence['n_points'],
+                    color=colors,
+                    picker=True,
+                )
+                for bar in bars:
+                    bar._xai_feature_key = 'cluster_support'
+
+                bars = ax_spread.barh(
+                    cluster_labels,
+                    evidence['uncertainty_radius_m'],
+                    color=colors,
+                    picker=True,
+                )
+                for bar in bars:
+                    bar._xai_feature_key = 'cluster_spread'
+
+            ax_support.set_title(
+                'Supporting anomaly windows',
+                fontsize=12,
+            )
+            ax_support.set_xlabel(
+                'Number of windows',
+                fontsize=10,
+            )
+            ax_spread.set_title('Spatial spread', fontsize=12)
+            ax_spread.set_xlabel(
+                'Weighted RMS distance to center (m)',
+                fontsize=10,
+            )
+
+            for axis in (ax_support, ax_spread):
+                self.style_analysis_axis(axis)
+
         else:
-            ax_clusters.text(0.5, 0.5, 'No clusters', ha='center', va='center', transform=ax_clusters.transAxes)
-        self.style_analysis_axis(ax_clusters)
-        self.analysis_geoxai_canvas.draw_idle()
+            axis = self.analysis_geoxai_figure.add_subplot(111)
+            table = (
+                report.local_contributions
+                if local
+                else report.contributions
+            )
+            column = 'shap_value' if local else 'mean_abs_shap'
+
+            if not table.empty and column in table:
+                importance = table.sort_values(column)
+                names = [
+                    FEATURE_HELP[feature][0]
+                    for feature in importance['feature']
+                ]
+                colors = [
+                    '#0F766E' if value >= 0 else '#B05C38'
+                    for value in importance[column]
+                ]
+
+                bars = axis.barh(
+                    names,
+                    importance[column],
+                    color=colors,
+                    picker=True,
+                )
+
+                for bar, key in zip(bars, importance['feature']):
+                    bar._xai_feature_key = key
+
+                for tick, key in zip(
+                    axis.get_yticklabels(),
+                    importance['feature'],
+                ):
+                    tick.set_picker(True)
+                    tick._xai_feature_key = key
+
+                axis.tick_params(axis='y', labelsize=10)
+
+                if local:
+                    axis.axvline(
+                        0,
+                        color='#6B7280',
+                        linewidth=0.8,
+                    )
+                    axis.set_title(
+                        f'Local SHAP: window {position + 1}',
+                        fontsize=12,
+                    )
+                    axis.set_xlabel(
+                        'Signed contribution to selected-neighborhood output',
+                        fontsize=10,
+                    )
+                else:
+                    axis.set_title(
+                        'Global SHAP: selected-neighborhood class',
+                        fontsize=12,
+                    )
+                    axis.set_xlabel(
+                        'Average absolute SHAP contribution',
+                        fontsize=10,
+                    )
+
+            else:
+                axis.text(
+                    0.5,
+                    0.5,
+                    'SHAP unavailable. See the explanation above.',
+                    ha='center',
+                    va='center',
+                    transform=axis.transAxes,
+                )
+                axis.set_axis_off()
+
+            self.style_analysis_axis(axis)
+
+        self.analysis_geoxai_canvas.draw_idle()    
+
+    def arm_xai_score_selection(self):
+        """Enable one explicit selection on the existing score trace."""
+        report = getattr(self, 'analysis_geoxai_report', None)
+
+        if report is None or report.metadata.get('status') != 'available':
+            return
+
+        self._xai_score_pick_armed = True
+
+        self.xai_selection_guide.setText(
+            'Click near a point on the anomaly-score trace. '
+            'Its time, score and cluster will identify the selected window.'
+        )
+
+        for index in range(self.analysis_visual_tabs.count()):
+            if self.analysis_visual_tabs.tabText(index) == 'Anomaly Scores':
+                self.analysis_visual_tabs.setCurrentIndex(index)
+                break
+
+        self.statusBar().showMessage(
+            'Choose a scored window: click near a point '
+            'on the anomaly-score trace.'
+        )
+
+    def select_xai_window_on_score(self, event):
+        """Explain the real window at a selected score-plot point."""
+        if (
+            not getattr(self, '_xai_score_pick_armed', False)
+            or event.button != 1
+        ):
+            return
+
+        report = getattr(self, 'analysis_geoxai_report', None)
+
+        if report is None or report.metadata.get('status') != 'available':
+            return
+
+        if (
+            not self.analysis_score_figure.axes
+            or event.inaxes is not self.analysis_score_figure.axes[0]
+        ):
+            return
+
+        toolbar = getattr(self.analysis_score_canvas, 'toolbar', None)
+
+        if toolbar is not None and getattr(toolbar, 'mode', ''):
+            return
+
+        import numpy as np
+
+        xy = self._xai_score_points[
+            ['t_center_s', 'score']
+        ].to_numpy(dtype=float)
+
+        pixels = event.inaxes.transData.transform(xy)
+
+        distance = np.hypot(
+            pixels[:, 0] - event.x,
+            pixels[:, 1] - event.y,
+        )
+
+        position = int(distance.argmin())
+
+        if distance[position] > 12:
+            return
+
+        self._xai_score_pick_armed = False
+
+        self.xai_view.blockSignals(True)
+        self.xai_window.blockSignals(True)
+
+        self.xai_view.setCurrentIndex(1)
+        self.xai_window.setValue(position + 1)
+
+        self.xai_view.blockSignals(False)
+        self.xai_window.blockSignals(False)
+
+        self.render_analysis_geoxai()
+
+        point = self._xai_score_points.iloc[position]
+        label = int(point['cluster_label'])
+        cluster = f'C{label}' if label >= 0 else 'no cluster'
+
+        category = report.features[
+            'pipeline_neighborhood'
+        ].iloc[position]
+
+        self.xai_selection_guide.setText(
+            f"Selected window {position + 1}: "
+            f"score {point['score']:.3f}, "
+            f"time {point['t_center_s']:.2f} s, "
+            f"{cluster}, {category}."
+        )
+
+        for index in range(self.analysis_visual_tabs.count()):
+            if 'Explainable' in self.analysis_visual_tabs.tabText(index):
+                self.analysis_visual_tabs.setCurrentIndex(index)
+                break
+
+        self.statusBar().showMessage(
+            f'Local explanation for scored window {position + 1}.'
+        )
