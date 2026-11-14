@@ -147,7 +147,19 @@ class ExportsMixin:
         points_path = base_path.with_suffix('.csv')
         output_paths = [points_path] + [
             base_path.with_name(f'{base_path.name}{suffix}')
-            for suffix in ('_clusters.csv', '_summary.txt', '_engineering_map.png', '_xai_explanation.txt', '_xai_contributions.csv', '_xai_clusters.csv', '_xai.png')
+            for suffix in (
+                '_clusters.csv',
+                '_summary.txt',
+                '_engineering_map.png',
+                '_xai_explanation.txt',
+                '_xai_contributions.csv',
+                '_xai_clusters.csv',
+                '_xai_features.csv',
+                '_xai_metadata.json',
+                '_xai_local_contributions.csv',
+                '_xai_local_metadata.json',
+                '_xai.png',
+            )
         ]
         if any(self.is_imported_file(path) for path in output_paths):
             QMessageBox.warning(self, 'Automated Anomaly Analysis Export', 'That name would overwrite an imported data file. Choose a different name.')
@@ -164,14 +176,71 @@ class ExportsMixin:
             summary_path.write_text(self.analysis_summary.toPlainText(), encoding='utf-8')
             written.append(summary_path)
             map_path = base_path.with_name(f'{base_path.name}_engineering_map.png')
-            report=getattr(self,'analysis_geoxai_report',None)
+            report = getattr(self, 'analysis_geoxai_report', None)
+
             if report is not None:
-                for suffix,content in [('_xai_explanation.txt',report.narrative),('_xai_contributions.csv',report.contributions),('_xai_clusters.csv',report.cluster_scores)]:
-                    path=base_path.with_name(base_path.name+suffix)
-                    if isinstance(content,str):path.write_text(content,encoding='utf-8')
-                    else:content.to_csv(path,index=False)
+                import json
+
+                for suffix, content in [
+                    (
+                        '_xai_explanation.txt',
+                        report.display_narrative or report.narrative,
+                    ),
+                    ('_xai_contributions.csv', report.contributions),
+                    ('_xai_clusters.csv', report.cluster_scores),
+                ]:
+                    path = base_path.with_name(base_path.name + suffix)
+
+                    if isinstance(content, str):
+                        path.write_text(content, encoding='utf-8')
+                    else:
+                        content.to_csv(path, index=False)
+
                     written.append(path)
-                xai_path=base_path.with_name(base_path.name+'_xai.png');self.analysis_geoxai_figure.savefig(xai_path,dpi=200,bbox_inches='tight');written.append(xai_path)
+
+                feature_path = base_path.with_name(
+                    base_path.name + '_xai_features.csv'
+                )
+                report.features.to_csv(feature_path, index=False)
+                written.append(feature_path)
+
+                metadata_path = base_path.with_name(
+                    base_path.name + '_xai_metadata.json'
+                )
+                metadata_path.write_text(
+                    json.dumps(report.metadata, indent=2),
+                    encoding='utf-8',
+                )
+                written.append(metadata_path)
+
+                if report.local_metadata.get('status') == 'available':
+                    local_path = base_path.with_name(
+                        base_path.name + '_xai_local_contributions.csv'
+                    )
+                    report.local_contributions.to_csv(
+                        local_path,
+                        index=False,
+                    )
+                    written.append(local_path)
+
+                    local_metadata_path = base_path.with_name(
+                        base_path.name + '_xai_local_metadata.json'
+                    )
+                    local_metadata_path.write_text(
+                        json.dumps(report.local_metadata, indent=2),
+                        encoding='utf-8',
+                    )
+                    written.append(local_metadata_path)
+
+                xai_path = base_path.with_name(
+                    base_path.name + '_xai.png'
+                )
+                self.analysis_geoxai_figure.savefig(
+                    xai_path,
+                    dpi=200,
+                    bbox_inches='tight',
+                )
+                written.append(xai_path)
             self.analysis_cluster_figure.savefig(map_path, dpi=200, bbox_inches='tight')
             written.append(map_path)
         except Exception as exc:
