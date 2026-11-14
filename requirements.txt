@@ -1,13 +1,13 @@
 
-#Python <= 3.14
+# XAI model tested with Python 3.11.9
 PyQt6
 PyQt6-WebEngine
 matplotlib
-numpy
+numpy==1.26.4
 pandas
 openpyxl
 scipy
-scikit-learn
+scikit-learn==1.9.1
 pyproj
 vmdpy
 utm
@@ -18,3 +18,7 @@ harmonica
 xarray
 rasterio
 xlrd
+# Saved Random Forest model and SHAP explanations
+shap==0.46.0
+joblib==1.4.2
+numba==0.60.0
