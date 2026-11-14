@@ -127,8 +127,11 @@ class AnalysisTabMixin:
         self.analysis_dataset_label.setWordWrap(True)
         controls_layout.addWidget(self.analysis_dataset_label)
         self.analysis_input = QComboBox()
-        self.analysis_input.addItems([labels.total_field_label(), 'Saved filter result'])
-        self.analysis_input.setToolTip('Use the shared cleaned baseline, or explicitly analyze the field currently shown on the map.')
+        self.analysis_input.addItem(labels.total_field_label())
+        self.analysis_input.setEnabled(False)
+        self.analysis_input.setToolTip(
+            'Source-location analysis always uses the cleaned total magnetic field.'
+        )
         self.analysis_input.currentIndexChanged.connect(self.process_analysis_dataset)
         controls_layout.addWidget(QLabel('Analyze:'))
         controls_layout.addWidget(self.analysis_input)
@@ -516,17 +519,13 @@ class AnalysisTabMixin:
         self.clear_analysis_results('Updating candidate analysis...')
         params = self.analysis_params()
         try:
-            if self.analysis_input.currentIndex() == 1:
-                source = self.map_view(session.working)
-                input_name = self.current_map_field_name()
-            else:
-                source = session.cleaned
-                input_name = f'Cleaned {labels.total_field_label()}'
+            source = session.cleaned
+            input_name = f'Cleaned {labels.total_field_label()}'
             frame = source.copy(deep=True)
             frame['Analysis_Field'] = frame['BT'].to_numpy(dtype=float)  # in the survey's unit
             frame['Analysis_Input'] = input_name
             frame['Source_Survey'] = Path(session.path).name
-            history = session.filter_history if self.analysis_input.currentIndex() == 1 else []
+            history = []
             frame['Analysis_Processing_History'] = json.dumps(history, sort_keys=True)
             frame['Analysis_Startup_Samples'] = session.cleaning_key[0]
             frame['Analysis_Spatial_MAD'] = session.cleaning_key[1]
