@@ -22,7 +22,7 @@ class SurveyActionsMixin:
             self.active_filters = []
         filters=self.active_filters + [settings['method']]
         self.filtered_scale_changed(frame,filters=filters,parameters=settings,replace_history=settings['field']!='Current result',
-            status_message='Filter result stored. Original map preserved; choose the analysis input in Automated Anomaly Analysis.')
+            status_message='Filter Lab working data updated.')
 
     def suggested_cleaning(self, session):
         """Data-based startup / MAD suggestion for a survey, computed once and kept on the session."""
@@ -260,9 +260,7 @@ class SurveyActionsMixin:
         self.assign_optional_v_values()
         self.display_processed_df(session.working)
         self.update_field_labels()
-        if self.analysis_input.currentIndex() == 1:
-            self.run_anomaly_analysis()
-        self.statusBar().showMessage(status_message or 'Map field updated; the analysis input is shown in Automated Anomaly Analysis.')
+        self.statusBar().showMessage(status_message or 'Working magnetic field updated.')
 
     def clear_data(self, df):
         #clear previous plots
