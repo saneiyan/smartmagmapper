@@ -69,9 +69,9 @@ class FilterWorkspace(QWidget):
         f.addRow('Field inclination',self.inc);f.addRow('Field declination',self.dec);f.addRow(self.direction_confirm)
         controls.addWidget(self.spatial_group)
         self.preview_button=QPushButton('Preview Filter');self.preview_button.setObjectName('primaryButton')
-        self.preview_button.setToolTip('Show the filter\u2019s effect without changing your data. '
-                                       'Click Store filter result for anomaly analysis to use the result.')
-        self.apply_button=QPushButton('Store filter result for anomaly analysis');self.apply_button.setEnabled(False)
+        self.preview_button.setToolTip('Preview the filter without changing the working magnetic data. '
+                                       'Click Apply Filter Result to apply the output.')
+        self.apply_button=QPushButton('Apply Filter Result');self.apply_button.setEnabled(False)
         self.reset_button=QPushButton('Reset (Clear Filter)')
         self.export_button=QPushButton('Export comparison / modes');self.export_button.setEnabled(False)
         for button in [self.preview_button,self.apply_button,self.reset_button,self.export_button]:controls.addWidget(button)
@@ -266,8 +266,8 @@ class FilterWorkspace(QWidget):
                 self.tabs.setCurrentIndex(0)
                 self.apply_button.setEnabled(True);self.export_button.setEnabled(True)
                 self.save_comparison.setEnabled(True)
-                self.message.setText('PREVIEW ONLY — '+self.selection_description()+'. Click Store filter result for anomaly analysis to use it.')
-                show_status(self,'Filter preview ready: '+self.method.currentText()+'. Review it, then click "Store filter result for anomaly analysis" to use it.',8000)
+                self.message.setText('PREVIEW ONLY — '+self.selection_description()+'. Working magnetic data are unchanged.')
+                show_status(self,'Filter preview ready: '+self.method.currentText()+'. Review it, then click Apply Filter Result to update the working magnetic data.',8000)
                 return True
             except sf.FilterSettingError as exc:error=('Invalid Filter Setting',exc,exc.setting)
             except Exception as exc:error=('Filter Could Not Run',exc,None)
@@ -318,8 +318,8 @@ class FilterWorkspace(QWidget):
         if self.result is None:return
         with busy(self,'Reconstructing the filtered signal from the selected VMD modes...'):
             self.result.select_modes(selected);self.draw_comparison()
-        show_status(self,'Reconstruction ready. Click Store filter result for anomaly analysis to use it.',6000)
-        self.message.setText('Manual retained modes: '+', '.join(map(str,selected))+'. Click Store filter result for anomaly analysis to use this reconstruction.')
+        show_status(self,'Reconstruction ready. Click Apply Filter Result to update the working magnetic data.',6000)
+        self.message.setText('Manual retained modes: '+', '.join(map(str,selected))+'. Click Apply Filter Result to apply this reconstruction.')
         self.apply_button.setEnabled(True)
 
     def draw_comparison(self):
@@ -379,15 +379,15 @@ class FilterWorkspace(QWidget):
         frame=session.working.copy(deep=True)
         # Keep the measured components intact; the filtered result becomes the current BT field.
         frame['BT']=r.after
-        # commit() redraws the maps and may rerun the analysis; it posts its own completion message.
-        with busy(self,'Applying filter result... updating maps and analysis.'):
+        # commit()updates the working data and redraw the map.
+        with busy(self,'Applying filter result... updating working data and maps.'):
             self.commit(frame,r.settings)
         self.preview_revision=None
         self.vmd.table.setEnabled(False)
         self.apply_button.setEnabled(False)
         self.update_applied_label()
         self.details.setText(self.applied_label.text()+"\n\n"+json.dumps(r.settings,indent=2)+"\n\n"+"\n".join(r.notes))
-        self.message.setText('APPLIED — '+self.settings_description(r.settings)+'. This result is now available to Automated Anomaly Analysis; its default analysis input remains unchanged.')
+        self.message.setText('APPLIED — '+self.settings_description(r.settings)+'. Working magnetic data updated.')
         return True
 
     def reset(self):
