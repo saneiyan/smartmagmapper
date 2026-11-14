@@ -1,164 +1,312 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from processing.xai_features import (
+    build_neighborhood_features,
+    neighborhood_labels,
+)
+from processing.xai_model import (
+    global_neighborhood_explanation,
+    local_neighborhood_explanation,
+)
 
 @dataclass
 class GeoXAIReport:
     narrative: str
     cluster_scores: pd.DataFrame
     contributions: pd.DataFrame
+    metadata: dict[str, Any] = field(default_factory=dict)
+    features: pd.DataFrame = field(default_factory=pd.DataFrame)
+    local_contributions: pd.DataFrame = field(default_factory=pd.DataFrame)
+    local_metadata: dict[str, Any] = field(default_factory=dict)
+    display_narrative: str = ''
 
+def explain_window(
+    features: pd.DataFrame,
+    score_points: pd.DataFrame,
+    coordinate_epsg: int,
+    window_position: int,
+) -> tuple[pd.DataFrame, dict]:
+    """Explain a scored window and retain its recorded spatial/time identity.
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return default
-    if not np.isfinite(out):
-        return default
-    return out
+    Parameters
+    ----------
+    features : pandas.DataFrame
+        Feature table for this survey in scored-window order.
+    score_points : pandas.DataFrame
+        Actual scored windows from the same analysis, in identical row order.
+    coordinate_epsg : int
+        Survey projected coordinate reference system.
+    window_position : int
+        Zero-based position of the window to explain.
 
+    Returns
+    -------
+    pandas.DataFrame
+        Signed local SHAP contributions and the actual feature values.
+    dict
+        Window identity, model output and explanation provenance.
+    """
+    if (
+        len(features) != len(score_points)
+        or not features.index.equals(score_points.index)
+    ):
+        raise ValueError(
+            'Explanation features and scored windows must have '
+            'identical rows and order.'
+        )
 
-def _normalize_positive(series: pd.Series) -> pd.Series:
-    values = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan)
-    vmax = values.max(skipna=True)
-    if not np.isfinite(vmax) or vmax <= 0:
-        return pd.Series(np.zeros(len(values)), index=series.index, dtype=float)
-    return (values.fillna(0.0) / float(vmax)).clip(0.0, 1.0)
+    identity = ['e_m', 'n_m', 'score', 'threshold_margin']
 
+    if not np.allclose(
+        features[identity].to_numpy(),
+        score_points[identity].to_numpy(),
+    ):
+        raise ValueError(
+            'Explanation features do not match these scored-window positions.'
+        )
 
-def _compactness_score(radius: pd.Series) -> pd.Series:
-    values = pd.to_numeric(radius, errors="coerce").replace([np.inf, -np.inf], np.nan)
-    valid = values.dropna()
-    if valid.empty:
-        return pd.Series(np.zeros(len(values)), index=radius.index, dtype=float)
-    scale = max(float(valid.median()), 1.0)
-    return (1.0 / (1.0 + values.fillna(scale) / scale)).clip(0.0, 1.0)
+    table, metadata = local_neighborhood_explanation(
+        features,
+        coordinate_epsg,
+        window_position,
+    )
 
+    point = score_points.iloc[window_position]
 
-def _shape_score(elongation: pd.Series) -> pd.Series:
-    values = pd.to_numeric(elongation, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(1.0)
-    values = values.clip(lower=1.0)
-    return (1.0 / values).clip(0.0, 1.0)
+    for col in (
+        'sample_index',
+        't_center_s',
+        'e_m',
+        'n_m',
+        'cluster_label',
+        'latitude',
+        'longitude',
+    ):
+        if col in point and pd.notna(point[col]):
+            metadata[col] = (
+                int(point[col])
+                if col in ('sample_index', 'cluster_label')
+                else float(point[col])
+            )
 
+    if 'pipeline_neighborhood' in features:
+        metadata['pipeline_neighborhood'] = str(
+            features['pipeline_neighborhood'].iloc[window_position]
+        )
 
-def score_clusters(score_points: pd.DataFrame, clusters: pd.DataFrame) -> pd.DataFrame:
-    if clusters is None or clusters.empty:
-        return pd.DataFrame()
-
-    out = clusters.copy().reset_index(drop=True)
-    out["support_score"] = _normalize_positive(out["n_points"])
-    out["peak_score_norm"] = _normalize_positive(out["peak_score"])
-    out["compactness_score"] = _compactness_score(out["uncertainty_radius_m"])
-    out["shape_score"] = _shape_score(out.get("elongation_ratio", pd.Series(np.ones(len(out)))))
-
-    margins = []
-    if score_points is not None and not score_points.empty and "threshold_margin" in score_points.columns:
-        for _, row in out.iterrows():
-            group = score_points[score_points["cluster_label"] == int(row["cluster_label"])]
-            margins.append(float(group["threshold_margin"].median()) if not group.empty else 0.0)
-    else:
-        margins = [0.0] * len(out)
-    out["median_threshold_margin"] = margins
-    out["threshold_separation_score"] = _normalize_positive(out["median_threshold_margin"])
-
-    out["geo_xai_confidence"] = (
-        0.30 * out["support_score"]
-        + 0.25 * out["peak_score_norm"]
-        + 0.25 * out["compactness_score"]
-        + 0.10 * out["shape_score"]
-        + 0.10 * out["threshold_separation_score"]
-    ).clip(0.0, 1.0)
-    out = out.sort_values("geo_xai_confidence", ascending=False).reset_index(drop=True)
-    out["geo_xai_rank"] = np.arange(1, len(out) + 1)
-    return out
-
-
-def selected_contributions(cluster_scores: pd.DataFrame) -> pd.DataFrame:
-    if cluster_scores is None or cluster_scores.empty:
-        return pd.DataFrame(columns=["factor", "score", "weight", "weighted_score"])
-    selected = cluster_scores[cluster_scores["selected_by_support_compactness"].astype(bool)]
-    row = selected.iloc[0] if not selected.empty else cluster_scores.iloc[0]
-    rows = [
-        ("Cluster support", _safe_float(row.get("support_score")), 0.30),
-        ("Magnetic peak strength", _safe_float(row.get("peak_score_norm")), 0.25),
-        ("Spatial compactness", _safe_float(row.get("compactness_score")), 0.25),
-        ("Threshold separation", _safe_float(row.get("threshold_separation_score")), 0.10),
-        ("Shape coherence", _safe_float(row.get("shape_score")), 0.10),
-    ]
-    out = pd.DataFrame(rows, columns=["factor", "score", "weight"])
-    out["weighted_score"] = out["score"] * out["weight"]
-    return out
-
+    return table, metadata
 
 def explain_candidate(
     clean_df: pd.DataFrame,
     score_points: pd.DataFrame,
     clusters: pd.DataFrame,
     summary: dict[str, Any],
-   reference_known: bool,
+    reference_known: bool,
 ) -> GeoXAIReport:
-    cluster_scores = score_clusters(score_points, clusters)
-    contributions = selected_contributions(cluster_scores)
+    """Report candidate-selection evidence and global SHAP separately.
 
-    if clusters is None or clusters.empty or "candidate_latitude" not in summary:
-        mode = "Known-reference mode" if reference_known else "Unknown-location mode"
-        narrative = (
-            f"{mode}\n\n"
-            "No explainable candidate was available because the current parameters did not produce a selected "
-            "cluster. Lower the threshold gamma, increase DBSCAN eps, or reduce DBSCAN minimum samples and rerun."
+    The existing pipeline supplies the selected candidate and its measured
+    properties. This function does not modify its inputs, select a different
+    cluster, or recalculate the candidate coordinates.
+    """
+    evidence = (
+        pd.DataFrame()
+        if clusters is None
+        else clusters.copy(deep=True)
+    )
+    empty = pd.DataFrame(columns=['factor', 'value', 'unit'])
+
+    status = (
+        'Candidate-selection evidence. Cluster support and spatial spread '
+        'below come directly from the location pipeline. They are separate '
+        'from the Random Forest neighborhood-classification explanation.'
+    )
+
+    if evidence.empty:
+        return GeoXAIReport(
+            status + '\n\nNo clusters were produced by the current analysis.',
+            evidence,
+            empty,
         )
-        return GeoXAIReport(narrative=narrative, cluster_scores=cluster_scores, contributions=contributions)
 
-    selected = cluster_scores[cluster_scores["selected_by_support_compactness"].astype(bool)]
-    row = selected.iloc[0] if not selected.empty else cluster_scores.iloc[0]
-    candidate_label = int(row["cluster_label"])
-    confidence = 100.0 * _safe_float(row.get("geo_xai_confidence"))
-    support = int(row["n_points"])
-    radius = _safe_float(row["uncertainty_radius_m"])
-    peak = _safe_float(row["peak_score"])
-    margin = _safe_float(row.get("median_threshold_margin"))
-    lat = _safe_float(row["centroid_latitude"])
-    lon = _safe_float(row["centroid_longitude"])
+    selected = evidence.loc[
+        evidence['selected_by_support_compactness'].astype(bool)
+    ]
+
+    if len(selected) != 1:
+        return GeoXAIReport(
+            status + '\n\nNo unique selected cluster is available.',
+            evidence,
+            empty,
+        )
+
+    row = selected.iloc[0]
+    label = int(row['cluster_label'])
+    support = int(row['n_points'])
+    spread = float(row['uncertainty_radius_m'])
+    peak = float(row['peak_score'])
+    gate = int(row['support_threshold_points'])
+
+    eligible = evidence.loc[
+        evidence['eligible_for_compactness'].astype(bool)
+    ]
+
+    if eligible.empty:
+        decision = (
+            'No cluster passed the support gate; the pipeline compared '
+            'all clusters as its fallback.'
+        )
+    else:
+        decision = (
+            f'{len(eligible)} cluster(s) passed the support gate '
+            f'of {gate} scored windows.'
+        )
+
+    margin = np.nan
+
+    if (
+        score_points is not None
+        and not score_points.empty
+        and 'threshold_margin' in score_points
+    ):
+        group = score_points.loc[
+            score_points['cluster_label'] == label
+        ]
+        if not group.empty:
+            margin = float(group['threshold_margin'].median())
+
+    evidence['median_threshold_margin'] = [
+        float(
+            score_points.loc[
+                score_points['cluster_label'] == lab,
+                'threshold_margin',
+            ].median()
+        )
+        if (
+            score_points is not None
+            and not score_points.empty
+            and 'threshold_margin' in score_points
+        )
+        else np.nan
+        for lab in evidence['cluster_label']
+    ]
+
+    narrative = (
+        status
+        + f'\n\nSelected cluster: C{label}\n'
+        f'Projected centroid: X (easting) = '
+        f'{row["centroid_e_m"]:.3f} m; '
+        f'Y (northing) = {row["centroid_n_m"]:.3f} m.\n'
+        f'Latitude = {row["centroid_latitude"]:.7f}; '
+        f'longitude = {row["centroid_longitude"]:.7f}.\n\n'
+        f'Selection: {decision} The pipeline selects the smallest '
+        f'score-weighted RMS spatial spread among the compared clusters, '
+        f'using the largest peak anomaly score to resolve spread ties.\n'
+        f'Centroid: the mean of cluster-window positions weighted by '
+        f'max(anomaly score, 0); equal weights are used only if their '
+        f'sum is zero.\n'
+        f'Measured support: {support} scored windows. '
+        f'Weighted RMS spatial spread: {spread:.3f} m. '
+        f'Peak anomaly score: {peak:.3f}. '
+        f'Median threshold margin: {margin:.3f}.\n'
+        'Spatial spread describes cluster dispersion, not a calibrated '
+        'location-uncertainty radius. Peak and threshold margin are '
+        'reported measurements, not additional weighted selection criteria.'
+    )
 
     if reference_known:
-        reference_text = (
-            f"The entered reference location is used only as validation/context here. "
-            f"The selected candidate is {summary.get('candidate_distance_to_reference_m', 0.0):.2f} m from that point."
+        narrative += (
+            '\nThe entered reference coordinate is comparison context '
+            'and is not used for candidate selection.'
         )
-        mode = "Known-reference interpretation"
-    else:
-        reference_text = (
-            "The candidate source location is estimated from the magnetic anomaly evidence, "
-            "cluster support, compactness, and uncertainty. Any entered coordinate is treated as a map/search context, "
-            "not ground truth."
-        )
-        mode = "Unknown-location GeoXAI interpretation"
 
-    support_threshold = int(row.get("support_threshold_points", 0))
-    eligibility = (
-        f"It passes the support gate of {support_threshold} windows."
-        if bool(row.get("eligible_for_compactness", False))
-        else f"It does not pass the support gate of {support_threshold} windows, so review it cautiously."
+    features = pd.DataFrame()
+    importance = pd.DataFrame()
+    metadata = {
+        'status': 'unavailable',
+        'target_class': 'selected neighborhood',
+    }
+
+    try:
+        raw_modes = summary.get('selected_modes', '')
+
+        modes = (
+            [int(v) for v in raw_modes.split(';') if v.strip()]
+            if isinstance(raw_modes, str)
+            else [int(v) for v in raw_modes]
+        )
+
+        features = build_neighborhood_features(
+            score_points,
+            clusters,
+            modes,
+        )
+
+        if (
+            clean_df is None
+            or clean_df.empty
+            or 'UTM_EPSG' not in clean_df
+        ):
+            raise ValueError(
+                'The survey projected CRS is required '
+                'for this reference model.'
+            )
+
+        epsg_values = clean_df['UTM_EPSG'].dropna().unique()
+
+        if len(epsg_values) != 1:
+            raise ValueError(
+                'The survey must use one verified projected CRS.'
+            )
+
+        importance, metadata = global_neighborhood_explanation(
+            features,
+            int(epsg_values[0]),
+        )
+
+        features['pipeline_neighborhood'] = neighborhood_labels(
+            score_points,
+            clusters,
+        ).to_numpy()
+
+        explanation = (
+            'Global SHAP | Target class: selected neighborhood\n'
+            f'Explained windows: {metadata["explained_windows"]} '
+            f'of {metadata["total_windows"]} in the current survey. '
+            'Bars show average absolute feature contributions to '
+            'neighborhood classification. They indicate influence, '
+            'not fixed weights or the probability of a well.\n'
+            'Reference-site model; current-survey explanations are '
+            'not independent detection validation. Model provenance '
+            'and explanation scope are included in the numerical exports.'
+        )
+
+    except (
+        ImportError,
+        ValueError,
+        OSError,
+        KeyError,
+        AssertionError,
+    ) as exc:
+        metadata['reason'] = str(exc)
+        explanation = (
+            'Global SHAP unavailable: '
+            + str(exc)
+            + ' Candidate-selection results are retained.'
+        )
+
+    narrative = explanation + '\n\n' + narrative
+
+    return GeoXAIReport(
+        narrative,
+        evidence,
+        importance,
+        metadata,
+        features,
     )
-    narrative = (
-        f"{mode}\n\n"
-        f"Selected candidate: C{candidate_label} at lat {lat:.6f}, lon {lon:.6f}.\n"
-        f"GeoXAI confidence: {confidence:.1f}/100. This is an interpretability score, not proof of a magnetic source.\n\n"
-        f"Why this candidate was selected:\n"
-        f"- Support: {support} anomaly-score windows are assigned to this cluster. {eligibility}\n"
-        f"- Peak response: the cluster reaches a score of {peak:.2f}, indicating a strong localized magnetic response.\n"
-        f"- Compactness: the estimated uncertainty radius is {radius:.2f} m; smaller compact clusters are preferred.\n"
-        f"- Threshold separation: the median score margin above threshold is {margin:.2f}.\n"
-        f"- Spatial logic: the candidate selection does not need a known reference coordinate; it uses the score-window "
-        f"geometry and DBSCAN cluster shape.\n\n"
-        f"{reference_text}\n\n"
-        f"Recommended field use: navigate to the candidate centroid, sweep a radius of about {max(radius, 3.0):.1f} m, "
-        "and confirm with repeated passes or another sensor before treating it as a final source location."
-    )
-    return GeoXAIReport(narrative=narrative, cluster_scores=cluster_scores, contributions=contributions)
