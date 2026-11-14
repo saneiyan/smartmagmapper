@@ -258,8 +258,7 @@ class MapFieldMixin:
         self.residual_cache = None
         self.display_processed_df(self.active_session().working)
         self.update_field_labels()
-        if self.analysis_input.currentIndex() == 1:
-            self.run_anomaly_analysis()
+       
 
     def upward_continuation(self, df=None):
         if self.active_session() is None or not self.assign_continuation_height():
