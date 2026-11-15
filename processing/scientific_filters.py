@@ -53,8 +53,6 @@ class FilterResult:
 def field_values(frame, field):
     if field == 'Total magnitude':
         return frame['BT'].to_numpy(dtype=float)
-    if field == 'Current result':
-        return frame['BT'].to_numpy(dtype=float)
     key = field if field in ('X', 'Y', 'Z') else None
     if key is None or key not in frame:
         raise ValueError(f'{signal_label(field)} is not available in this survey.')
@@ -90,8 +88,8 @@ def run_filter(frame, field='Total magnitude', domain='Time', method='VMD', **pa
         raise ValueError("This application's VMD workflow is time-based; choose Time.")
     before = field_values(frame, field)
     if domain == 'Spatial grid':
-        if field not in ('Total magnitude', 'Current result'):
-            raise ValueError('This spatial workflow accepts scalar total-field or scalar-result data only.')
+        if field != 'Total magnitude':
+            raise ValueError('Spatial transformations require the total magnetic field; individual device components are not supported.')
         return _spatial(frame, before, method, params, field)
     if method not in SERIES_FILTERS:
         raise ValueError('Choose a time/path-series filter for this domain.')
