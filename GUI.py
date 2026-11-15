@@ -355,6 +355,8 @@ if __name__ == '__main__':
     catchErrors() # prevent crash of the app
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
+    from ui.theme import apply_matplotlib_theme
+    apply_matplotlib_theme()
     from processing.data_analysis_pipeline import SmartMagMapper_version
     app.setApplicationName('SmartMagMapper')
     app.setApplicationVersion(SmartMagMapper_version)

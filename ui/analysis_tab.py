@@ -612,7 +612,7 @@ class AnalysisTabMixin:
         self.refresh_analysis_geoxai(clean_df, score_points, clusters, summary)
         self.refresh_analysis_web_map(clean_df, score_points, clusters, summary)
 
-    def style_analysis_axis(self, ax):
+    def style_analysis_axis(self, ax): # Shouldn't force colors - commented out when called. Can replace colors with 'bg' or 'text'
         ax.set_facecolor('#FFFFFF')
         ax.grid(color='#E5E7EB', linewidth=0.8, alpha=0.9)
         for spine in ax.spines.values():
@@ -631,7 +631,7 @@ class AnalysisTabMixin:
         ax_field.set_xlabel('Time (s)')
         ax_field.set_ylabel(labels.total_field_label())
         ax_field.margins(x=0.01)
-        self.style_analysis_axis(ax_field)
+        # self.style_analysis_axis(ax_field)
         self.analysis_field_canvas.draw_idle()
 
     def plot_analysis_score_trace(self, score_points):
@@ -670,7 +670,7 @@ class AnalysisTabMixin:
         ax_score.margins(x=0.01)
         if score_points is not None and not score_points.empty:
             ax_score.legend(loc='upper left', frameon=True, fontsize=9)
-        self.style_analysis_axis(ax_score)
+        # self.style_analysis_axis(ax_score)
         self.analysis_score_canvas.draw_idle()
 
     def plot_analysis_mode_metrics(self):
@@ -906,8 +906,8 @@ class AnalysisTabMixin:
                 fontsize=10,
             )
 
-            for axis in (ax_support, ax_spread):
-                self.style_analysis_axis(axis)
+            # for axis in (ax_support, ax_spread):
+            #     self.style_analysis_axis(axis)
 
         else:
             axis = self.analysis_geoxai_figure.add_subplot(111)
@@ -979,7 +979,7 @@ class AnalysisTabMixin:
                 )
                 axis.set_axis_off()
 
-            self.style_analysis_axis(axis)
+            # self.style_analysis_axis(axis)
 
         self.analysis_geoxai_canvas.draw_idle()    
 
