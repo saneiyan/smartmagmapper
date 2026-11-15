@@ -5,7 +5,7 @@
 block_cipher = None
 
 
-a = Analysis(['ui.py'],
+a = Analysis(['GUI.py'],
              pathex=[],
              binaries=[],
              datas=[('./imgs/*','./imgs'),

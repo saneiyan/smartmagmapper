@@ -1,4 +1,4 @@
-conda activate pyside6 && ^
+conda activate smartmagmapper && ^
 pyinstaller -y ui-dir.spec && ^
 cd dist && ^
 7z a -aoa -r ui.zip ui && ^
