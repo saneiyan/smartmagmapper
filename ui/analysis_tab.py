@@ -44,81 +44,81 @@ class AnalysisTabMixin:
         root_layout = QVBoxLayout(widget)
         root_layout.setContentsMargins(10, 10, 10, 10)
         root_layout.setSpacing(10)
-        widget.setStyleSheet("""
-            QWidget#analysisPage {
-                background: #111827;
-                color: #E5E7EB;
-            }
-            QWidget#analysisPage QGroupBox {
-                border: 1px solid #374151;
-                border-radius: 6px;
-                margin-top: 14px;
-                padding: 10px;
-                font-weight: 600;
-            }
-            QWidget#analysisPage QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 4px;
-            }
-            QWidget#analysisPage QPushButton {
-                min-height: 30px;
-                border: 1px solid #4B5563;
-                border-radius: 5px;
-                background: #1F2937;
-                color: #F9FAFB;
-            }
-            QWidget#analysisPage QPushButton:hover {
-                background: #263244;
-                border-color: #64748B;
-            }
-            QWidget#analysisPage QComboBox {
-                background: #1F2937;
-                color: #F9FAFB;
-                border: 1px solid #4B5563;
-                border-radius: 5px;
-                min-height: 28px;
-                padding: 4px;
-            }
-            QWidget#analysisPage QComboBox::drop-down {
-                border: none;
-            }
-            QWidget#analysisPage QComboBox QAbstractItemView {
-                background: #1F2937;
-                color: #F9FAFB;
-                selection-background-color: #4B5563;
-            }
-            QWidget#analysisPage QDoubleSpinBox,
-            QWidget#analysisPage QSpinBox,
-            QWidget#analysisPage QTextEdit {
-                background: #1F2937;
-                color: #F9FAFB;
-                border: 1px solid #4B5563;
-                border-radius: 5px;
-                min-height: 28px;
-            }
-            QWidget#analysisPage QTabWidget::pane {
-                border: 1px solid #374151;
-                border-radius: 6px;
-                background: #0F172A;
-            }
-            QWidget#analysisPage QTabBar::tab {
-                background: #1F2937;
-                color: #D1D5DB;
-                padding: 8px 14px;
-                border: 1px solid #374151;
-                border-bottom: none;
-                min-width: 96px;
-            }
-            QWidget#analysisPage QTabBar::tab:selected {
-                background: #F9FAFB;
-                color: #111827;
-            }
-            QWidget#analysisPage QScrollArea {
-                border: none;
-                background: #111827;
-            }
-        """)
+        #widget.setStyleSheet("""
+        #    QWidget#analysisPage {
+        #        background: #111827;
+        #        color: #E5E7EB;
+        #    }
+        #    QWidget#analysisPage QGroupBox {
+        #        border: 1px solid #374151;
+        #        border-radius: 6px;
+        #        margin-top: 14px;
+        #        padding: 10px;
+        #        font-weight: 600;
+        #    }
+        #    QWidget#analysisPage QGroupBox::title {
+        #        subcontrol-origin: margin;
+        #        left: 10px;
+        #        padding: 0 4px;
+        #    }
+        #    QWidget#analysisPage QPushButton {
+        #        min-height: 30px;
+        #        border: 1px solid #4B5563;
+        #        border-radius: 5px;
+        #        background: #1F2937;
+        #        color: #F9FAFB;
+        #    }
+        #    QWidget#analysisPage QPushButton:hover {
+        #        background: #263244;
+        #        border-color: #64748B;
+        #    }
+        #    QWidget#analysisPage QComboBox {
+        #        background: #1F2937;
+        #        color: #F9FAFB;
+        #        border: 1px solid #4B5563;
+        #        border-radius: 5px;
+        #        min-height: 28px;
+        #        padding: 4px;
+        #    }
+        #    QWidget#analysisPage QComboBox::drop-down {
+        #        border: none;
+        #    }
+        #    QWidget#analysisPage QComboBox QAbstractItemView {
+        #        background: #1F2937;
+        #        color: #F9FAFB;
+        #        selection-background-color: #4B5563;
+        #    }
+        #    QWidget#analysisPage QDoubleSpinBox,
+        #    QWidget#analysisPage QSpinBox,
+        #    QWidget#analysisPage QTextEdit {
+        #        background: #1F2937;
+        #        color: #F9FAFB;
+        #        border: 1px solid #4B5563;
+        #        border-radius: 5px;
+        #        min-height: 28px;
+        #    }
+        #    QWidget#analysisPage QTabWidget::pane {
+        #        border: 1px solid #374151;
+        #        border-radius: 6px;
+        #        background: #0F172A;
+        #    }
+        #    QWidget#analysisPage QTabBar::tab {
+        #        background: #1F2937;
+        #        color: #D1D5DB;
+        #        padding: 8px 14px;
+        #        border: 1px solid #374151;
+        #        border-bottom: none;
+        #        min-width: 96px;
+        #    }
+        #    QWidget#analysisPage QTabBar::tab:selected {
+        #        background: #F9FAFB;
+        #        color: #111827;
+        #    }
+        #    QWidget#analysisPage QScrollArea {
+        #        border: none;
+        #        background: #111827;
+        #    }
+        #""")
 
         controls = QGroupBox('Workflow and parameters')
         controls_layout = QVBoxLayout()
