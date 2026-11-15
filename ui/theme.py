@@ -84,7 +84,10 @@ def panel_toggle(panel,open_text,closed_text='Settings',name='settings',on_chang
     Place it directly above the panel; it stays visible while the panel is collapsed.
     on_change(visible) runs after each toggle (e.g. to resize a splitter).
     """
-    button=small_tool_button();button.setCheckable(True);button.setChecked(True)
+    #button=small_tool_button();button.setCheckable(True);button.setChecked(True)
+    button = QToolButton()
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+    button.setCheckable(True); button.setChecked(True)
     def update(visible):
         panel.setVisible(visible)
         button.setArrowType(Qt.ArrowType.LeftArrow if visible else Qt.ArrowType.RightArrow)
