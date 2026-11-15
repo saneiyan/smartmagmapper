@@ -24,7 +24,7 @@ from PyQt6.QtWebEngineCore import QWebEngineSettings
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from pathlib import Path
-from ui.theme import panel_toggle, TabArrows
+from ui.theme import panel_toggle, TabArrows, plot_palette
 from ui.vmd_panel import VMDPanel
 from ui.xai_help import FEATURE_HELP, show_picked_feature
 from processing import data_analysis_pipeline as dap
@@ -612,26 +612,27 @@ class AnalysisTabMixin:
         self.refresh_analysis_geoxai(clean_df, score_points, clusters, summary)
         self.refresh_analysis_web_map(clean_df, score_points, clusters, summary)
 
-    def style_analysis_axis(self, ax): # Shouldn't force colors - commented out when called. Can replace colors with 'bg' or 'text'
-        ax.set_facecolor('#FFFFFF')
-        ax.grid(color='#E5E7EB', linewidth=0.8, alpha=0.9)
+    def style_analysis_axis(self, ax):
+        pal = plot_palette()
+        ax.set_facecolor(pal['bg'])
+        ax.grid(color=pal['grid'], linewidth=0.8, alpha=0.9)
         for spine in ax.spines.values():
-            spine.set_color('#CBD5E1')
-        ax.tick_params(colors='#111827')
-        ax.title.set_color('#111827')
-        ax.xaxis.label.set_color('#111827')
-        ax.yaxis.label.set_color('#111827')
+            spine.set_color(pal['spine'])
+        ax.tick_params(colors=pal['text'])
+        ax.title.set_color(pal['text'])
+        ax.xaxis.label.set_color(pal['text'])
+        ax.yaxis.label.set_color(pal['text'])
 
     def plot_analysis_total_field(self, clean_df):
         self.analysis_field_figure.clear()
         ax_field = self.analysis_field_figure.add_subplot(111)
         ordered = clean_df.sort_values('Time (s)').reset_index(drop=True)
-        ax_field.plot(ordered['Time (s)'], ordered['BT'], color='#111827', linewidth=0.9)
+        ax_field.plot(ordered['Time (s)'], ordered['BT'], color=plot_palette()['text'], linewidth=0.9)
         ax_field.set_title('Analysis field: ' + self.analysis_summary_data.get('analysis_input', f'Cleaned {labels.total_field_label()}'), pad=12)
         ax_field.set_xlabel('Time (s)')
         ax_field.set_ylabel(labels.total_field_label())
         ax_field.margins(x=0.01)
-        # self.style_analysis_axis(ax_field)
+        self.style_analysis_axis(ax_field)
         self.analysis_field_canvas.draw_idle()
 
     def plot_analysis_score_trace(self, score_points):
@@ -648,7 +649,7 @@ class AnalysisTabMixin:
                     hits['score'],
                     s=18,
                     color='#F59E0B',
-                    edgecolor='#111827',
+                    edgecolor=plot_palette()['text'],
                     linewidth=0.25,
                     label='hit window',
                     zorder=3,
@@ -670,7 +671,7 @@ class AnalysisTabMixin:
         ax_score.margins(x=0.01)
         if score_points is not None and not score_points.empty:
             ax_score.legend(loc='upper left', frameon=True, fontsize=9)
-        # self.style_analysis_axis(ax_score)
+        self.style_analysis_axis(ax_score)
         self.analysis_score_canvas.draw_idle()
 
     def plot_analysis_mode_metrics(self):
@@ -906,8 +907,8 @@ class AnalysisTabMixin:
                 fontsize=10,
             )
 
-            # for axis in (ax_support, ax_spread):
-            #     self.style_analysis_axis(axis)
+            for axis in (ax_support, ax_spread):
+                self.style_analysis_axis(axis)
 
         else:
             axis = self.analysis_geoxai_figure.add_subplot(111)
@@ -979,7 +980,7 @@ class AnalysisTabMixin:
                 )
                 axis.set_axis_off()
 
-            # self.style_analysis_axis(axis)
+            self.style_analysis_axis(axis)
 
         self.analysis_geoxai_canvas.draw_idle()    
 
