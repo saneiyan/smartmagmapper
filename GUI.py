@@ -355,7 +355,12 @@ if __name__ == '__main__':
     catchErrors() # prevent crash of the app
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
+    from processing.data_analysis_pipeline import SmartMagMapper_version
+    app.setApplicationName('SmartMagMapper')
+    app.setApplicationVersion(SmartMagMapper_version)
+    app.setApplicationDisplayName('SmartMagMapper') 
     window = MainWindow()
+    window.setWindowTitle(f"{app.applicationName()} v{app.applicationVersion()}")
     window.show()
     if len(sys.argv) > 1:
         startup_file = sys.argv[1]

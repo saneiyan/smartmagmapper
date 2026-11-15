@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+SmartMagMapper_version = '1.0.0' #app version - for update check
 from dataclasses import dataclass
 from functools import lru_cache
 import math
