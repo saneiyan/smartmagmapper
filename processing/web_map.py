@@ -36,7 +36,7 @@ CONTROL_BACKGROUND_CSS = '''
 '''
 
 # Satellite imagery shared by every web map in the app (Data & Cleaning and Location Estimate).
-GOOGLE_SATELLITE = dict(tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google',
+GOOGLE_SATELLITE = dict(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google',
                         max_zoom=25, name='Google Satellite')
 
 
