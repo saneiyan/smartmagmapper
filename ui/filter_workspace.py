@@ -36,7 +36,7 @@ class FilterWorkspace(QWidget):
         form=QFormLayout();self.input_form=form
         # Labels (with units) are shown; the internal signal name is the item data used by the filters and projects.
         self.field=QComboBox()
-        for signal in ['Total magnitude','X','Y','Z','Current result']:self.field.addItem(signal_label(signal),signal)
+        for signal in ['Total magnitude','X','Y','Z']:self.field.addItem(signal_label(signal),signal)
         self.domain=QComboBox();self.domain.addItems(['Time','Path distance','Spatial grid'])
         # Alphabetical list; VMD stays the default selection.
         self.method=QComboBox();self.method.addItems(sorted(sf.SERIES_FILTERS+sf.SPATIAL_FILTERS,key=str.casefold));self.method.setCurrentText('VMD')
@@ -174,7 +174,7 @@ class FilterWorkspace(QWidget):
         self.spatial_form.setRowVisible(self.gain,method=='Regularized downward continuation')
         if method!='VMD' and self.tabs.currentWidget() is self.vmd:self.tabs.setCurrentIndex(0)
         session=self.get_session()
-        for index,name in enumerate(['Total magnitude','X','Y','Z','Current result']):
+        for index,name in enumerate(['Total magnitude','X','Y','Z']):
             available=session is not None and (name not in 'XYZ' or name in session.cleaned)
             self.field.model().item(index).setEnabled(available and (not spatial or name not in 'XYZ'))
         if spatial and self.field.currentData() in ('X','Y','Z'):self.field.setCurrentIndex(0)
@@ -234,7 +234,7 @@ class FilterWorkspace(QWidget):
         self.message.setText('Active survey: '+Path(session.path).name if session else 'Import a survey once to begin.')
         if session is not None and self.field.currentData() in ('X','Y','Z') and self.field.currentData() not in session.cleaned:
             self.field.setCurrentIndex(0)
-        for i,name in enumerate(['Total magnitude','X','Y','Z','Current result']):
+        for i,name in enumerate(['Total magnitude','X','Y','Z']):
             self.field.model().item(i).setEnabled(session is not None and (name not in 'XYZ' or (name in session.cleaned and self.method.currentText() not in sf.SPATIAL_FILTERS)))
 
     def preview(self):
@@ -248,13 +248,9 @@ class FilterWorkspace(QWidget):
         # Long filters (VMD, spatial grids) block the window; say so in the status bar.
         with busy(self,f'Running {self.method.currentText()} preview on {self.field.currentText()}... VMD and spatial-grid filters can take a while.'):
             try:
-                if self.domain.currentText() == 'Spatial grid' and self.field.currentData() == 'Current result':
-                    history=session.filter_history
-                    if any(step['parameters'].get('field') in ('X','Y','Z') for step in history):
-                        raise ValueError(f"Choose {signal_label('Total magnitude')} for spatial transforms; the current result came from a phone component.")
-                frame=session.working if self.field.currentData()=='Current result' else session.cleaned
+                frame=session.cleaned
                 result=sf.run_filter(frame,self.field.currentData(),self.domain.currentText(),self.method.currentText(),**self.active_parameters())
-                result.settings['input_history']=json.loads(json.dumps(session.filter_history)) if self.field.currentData()=='Current result' else []
+                result.settings['input_history']=[]
                 result.settings['cleaning']={'startup_samples':session.cleaning_key[0],'spatial_mad_multiplier':session.cleaning_key[1],'fallback_percentile':session.cleaning_key[2]}
                 result.settings['source_survey']=Path(session.path).name
                 self.vmd.table.setEnabled(True)
@@ -376,8 +372,8 @@ class FilterWorkspace(QWidget):
         if session.revision!=self.preview_revision:
             self.invalidate();self.message.setText('The survey changed. Preview the filter again before storing it.');return False
         r=self.result
-        frame=session.working.copy(deep=True)
-        # Keep the measured components intact; the filtered result becomes the current BT field.
+        frame=session.cleaned.copy(deep=True)
+        # Preserve the cleaned components and store the selected filter output for display and export.
         frame['BT']=r.after
         # commit()updates the working data and redraw the map.
         with busy(self,'Applying filter result... updating working data and maps.'):
