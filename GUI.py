@@ -267,7 +267,7 @@ class MainWindow(SurveyActionsMixin, AnalysisTabMixin, LocationTabMixin, MapFiel
         self.setCentralWidget(central_widget)
         self.setMinimumSize(1200, 760)
         self.resize(1500, 940)
-        self.apply_scientific_style()
+        # self.apply_scientific_style() # commenting for now until we figure out the dark theme
         self.global_controls_widget.hide()
 
     def update_global_controls_visibility(self,index):
@@ -275,7 +275,7 @@ class MainWindow(SurveyActionsMixin, AnalysisTabMixin, LocationTabMixin, MapFiel
         self.global_controls_widget.hide()
         self.shared_survey_widget.show()
 
-    def apply_scientific_style(self):
+    def apply_scientific_style(self): # Sina: We need to find the right dark mode 
         self.setStyleSheet("""
             QMainWindow, QWidget { font-family: 'Segoe UI'; font-size: 10pt; color: #172b4d; background: #f4f7fb; }
             QToolBar { background: #15324f; padding: 8px; spacing: 14px; border: 0; }
