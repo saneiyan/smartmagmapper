@@ -122,7 +122,7 @@ class DataWorkspace(QWidget):
         self.signal_page=QWidget();signal_layout=QVBoxLayout(self.signal_page)
         signal_layout.addLayout(signal_controls);signal_layout.addWidget(self.plot_tabs)
         self.tabs.addTab(self.signal_page,'Signal Plots')
-        self.tab_arrows=TabArrows(self.tabs)
+        #self.tab_arrows=TabArrows(self.tabs)
         self.tabs.currentChanged.connect(self.update_context_controls)
         self.plot_tabs.currentChanged.connect(self.sync_signal_column)
         self.plot_tabs.currentChanged.connect(self.update_scale_context)

@@ -42,7 +42,7 @@ def small_tool_button(text='',arrow=None,tooltip=''):
     return button
 
 
-class TabArrows(QWidget):
+class TabArrows(QWidget): # Not needed.
     """Small ◀ ▶ buttons in a tab widget's top-right corner that step through its sub-tabs.
 
     Hidden or disabled tabs are skipped, and the arrows never leave this tab widget.

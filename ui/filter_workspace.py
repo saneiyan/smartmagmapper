@@ -122,7 +122,7 @@ class FilterWorkspace(QWidget):
         # The Compare filters box sits in the settings panel (above the stretch) and shows only on the Compare Filters tab.
         outer.insertWidget(outer.count()-1,self.comparisons.panel)
         self.tabs.currentChanged.connect(self.update_compare_panel);self.update_compare_panel()
-        self.tab_arrows=TabArrows(self.tabs)
+        #self.tab_arrows=TabArrows(self.tabs)
         self.map_colors.currentIndexChanged.connect(self.redraw_maps)
         self.save_comparison=QPushButton('Store filter results for comparison');self.save_comparison.setEnabled(False)
         controls.insertWidget(controls.indexOf(self.preview_button)+1,self.save_comparison)
@@ -163,7 +163,7 @@ class FilterWorkspace(QWidget):
         self.gain.setEnabled(method=='Regularized downward continuation')
         self.tabs.setTabVisible(1,method=='VMD')
         self.tabs.setTabVisible(2,not spatial)
-        self.tab_arrows.refresh()
+        #self.tab_arrows.refresh()
         self.series_form.setRowVisible(self.polynomial_label,method==sf.SERIES_FILTERS[1])
         self.series_form.setRowVisible(self.window_length,method in ('Moving average','Savitzky–Golay'))
         self.series_form.setRowVisible(self.low,method in ('High-pass','Band-pass'))
@@ -258,7 +258,7 @@ class FilterWorkspace(QWidget):
                 self.draw_comparison()
                 if result.modes is not None:
                     self.vmd.set_data(result.mode_axis,result.mode_signal,result.modes,result.metrics,result.selected,result.axis_label)
-                self.tabs.setTabVisible(1,result.modes is not None);self.tab_arrows.refresh()
+                self.tabs.setTabVisible(1,result.modes is not None)#;#self.tab_arrows.refresh()
                 self.tabs.setCurrentIndex(0)
                 self.apply_button.setEnabled(True);self.export_button.setEnabled(True)
                 self.save_comparison.setEnabled(True)

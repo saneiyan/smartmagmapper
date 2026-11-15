@@ -375,8 +375,8 @@ class AnalysisTabMixin:
         settings_column.addStretch(0)  # keeps the toggle at the top while the panel is collapsed
 
         # Previous / next view: small arrows at the right end of the sub-tab bar.
-        self.analysis_tab_arrows = TabArrows(self.analysis_visual_tabs)
-        self.previous_stage, self.next_stage = self.analysis_tab_arrows.previous, self.analysis_tab_arrows.next
+        #self.analysis_tab_arrows = TabArrows(self.analysis_visual_tabs)
+        #self.previous_stage, self.next_stage = self.analysis_tab_arrows.previous, self.analysis_tab_arrows.next
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.analysis_splitter = splitter

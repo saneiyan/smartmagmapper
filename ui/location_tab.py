@@ -53,7 +53,7 @@ class LocationTabMixin:
         export=QPushButton('Export location results');export.clicked.connect(self.export_analysis_results)
         footer.addWidget(back);footer.addStretch();footer.addWidget(export);layout.addLayout(footer)
         # Two views moved to this tab, so the Automated Anomaly Analysis arrows need refreshing.
-        self.analysis_visual_tabs.setCurrentIndex(0);self.analysis_tab_arrows.refresh()
+        #self.analysis_visual_tabs.setCurrentIndex(0);self.analysis_tab_arrows.refresh()
         return page
 
     def location_map_changed(self, *_):
