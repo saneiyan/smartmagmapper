@@ -929,15 +929,11 @@ class AnalysisTabMixin:
                     for value in importance[column]
                 ]
 
-                bars = axis.barh(
+                axis.barh(
                     names,
                     importance[column],
                     color=colors,
-                    picker=True,
                 )
-
-                for bar, key in zip(bars, importance['feature']):
-                    bar._xai_feature_key = key
 
                 for tick, key in zip(
                     axis.get_yticklabels(),
