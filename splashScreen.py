@@ -69,7 +69,7 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    splash_pix = QPixmap(os.path.join(bundle_dir, 'imgs/logo_l.png'))
+    splash_pix = QPixmap(os.path.join(bundle_dir, 'imgs/logo_s.png'))
     splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
     splash.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
     splash.setEnabled(False)
