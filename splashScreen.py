@@ -1,20 +1,17 @@
 """ splashScreen
 
 """
-from PySide6.QtWidgets import QSplashScreen, QApplication, QProgressBar
-from PySide6.QtGui import QPixmap, QMovie
-from PySide6.QtCore import Qt
-#from PyQt5.QtWidgets import QSplashScreen, QApplication, QProgressBar
-#from PyQt5.QtGui import QPixmap, QMovie
-#from PyQt5.QtCore import Qt
+from PyQt6.QtWidgets import QSplashScreen, QApplication, QProgressBar
+from PyQt6.QtGui import QPixmap, QMovie
+from PyQt6.QtCore import Qt
 from zipfile import ZipFile, ZipInfo
 from subprocess import Popen
 import os
 import sys
 import shutil
 import platform
-QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True) # for high dpi display
-QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+# Qt6 note: AA_EnableHighDpiScaling / AA_UseHighDpiPixmaps no longer exist --
+# high-DPI scaling is always on in Qt6, so the PySide6 setAttribute lines were dropped.
 
 OS = platform.system()
 
@@ -42,15 +39,14 @@ class MySplashScreen(QSplashScreen):
         QSplashScreen.__init__(self, QPixmap(), flags)
         self.movie = QMovie(animation)
         self.movie.frameChanged.connect(self.onNextFrame)
-        #self.connect(self.movie, SIGNAL('frameChanged(int)'), SLOT('onNextFrame()'))
         self.movie.start()
 
     def onNextFrame(self):
         pixmap = self.movie.currentPixmap()
         self.setPixmap(pixmap)
         self.setMask(pixmap.mask())
-        
-        
+
+
 class MyZipFile(ZipFile):
     def extract(self, member, path=None, pwd=None):
         if not isinstance(member, ZipInfo):
@@ -74,15 +70,15 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     splash_pix = QPixmap(os.path.join(bundle_dir, 'imgs/logo_l.png'))
-    splash = QSplashScreen(splash_pix, Qt.WindowStaysOnTopHint)
-    splash.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
+    splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
+    splash.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
     splash.setEnabled(False)
     # adding progress bar
     progressBar = QProgressBar(splash)
     progressBar.setGeometry(100, splash_pix.height() - 50, splash_pix.width() - 200, 20)
 
     splash.show()
-    splash.showMessage("Unzipping files", Qt.AlignBottom | Qt.AlignCenter, Qt.white)
+    splash.showMessage("Unzipping files", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
     app.processEvents()
 
     zf = MyZipFile(os.path.join(bundle_dir, 'ui.zip'),'r')
@@ -97,22 +93,22 @@ if __name__ == "__main__":
     for file in zf.infolist():
         extracted_size += file.file_size
         percentage = extracted_size * 100/uncompress_size
-        progressBar.setValue(percentage)
+        progressBar.setValue(int(percentage))
         if percentage > 50 and percentage < 70:
-            splash.showMessage("Copying temp files", Qt.AlignBottom | Qt.AlignCenter, Qt.white)
+            splash.showMessage("Copying temp files", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
         if percentage >= 70 and percentage < 80:
-            splash.showMessage("Checking files", Qt.AlignBottom | Qt.AlignCenter, Qt.white)
+            splash.showMessage("Checking files", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
         if percentage >= 80 and percentage < 90:
-            splash.showMessage("Loading libraries", Qt.AlignBottom | Qt.AlignCenter, Qt.white)
+            splash.showMessage("Loading libraries", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
         if percentage >= 90 and percentage < 98:
-            splash.showMessage("Loading App", Qt.AlignBottom | Qt.AlignCenter, Qt.white)
+            splash.showMessage("Loading App", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
         if percentage >= 98:
-            splash.showMessage("Almost there!", Qt.AlignBottom | Qt.AlignCenter, Qt.white)
+            splash.showMessage("Almost there!", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
         app.processEvents()
         zf.extract(file, extractDir)
     zf.close()
     print('finished unzipping')
-    
+
     splash.hide()
     splash.close()
     appDir = os.path.join(bundle_dir, 'ui', 'ui') # zip always putting a double dir ... don't know why
@@ -129,11 +125,10 @@ if __name__ == "__main__":
 
 #  need to comment the following lines as the exit signal is given by the main app
 #    sys.exit()
-#    sys.exit(app.exec_()) 
-    
+#    sys.exit(app.exec())
+
 """ NOTE
-This approach increase significantly the size of the package from 150 to 210 MB
+This approach increase significantly the size of the package.
 Another approach would be to load all modules in this script and just unzip the
 sources and run `python ui.py`.
 """
-
