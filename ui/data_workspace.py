@@ -508,5 +508,6 @@ class DataWorkspace(QWidget):
         # Same colour scale and limits as the scatter/contour colour bar.
         colors=color_list(self.map_colors.currentData())
         path=WebMap.build_map(frame,value_column=col,caption=field_label(col),vmin=lo,vmax=hi,colors=colors,
-                              excluded=removed if before else None,layer_name=f'{self.map_stage.currentText()} | {len(frame):,} Samples')
+                              excluded=removed if before else None,layer_name=f'<span style="display:inline-block;vertical-align:top">'
+                                                                              f'{self.map_stage.currentText()}<br>{len(frame):,} Samples</span>')
         self.web_comparison.load(QUrl.fromLocalFile(path))
