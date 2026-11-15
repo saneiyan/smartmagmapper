@@ -41,9 +41,54 @@ CONTROL_BACKGROUND_CSS = '''
 </style>
 '''
 
+
+# Leaflet's layer control cannot group base layers, so the dated Wayback entries are folded
+# into a collapsible "Historical imagery" section by this small script (added to every map
+# that has Wayback layers). Google Hybrid stays outside the fold, always visible.
+HISTORICAL_GROUP_JS = """
+<script>
+(function () {
+    function group() {
+        var base = document.querySelector('.leaflet-control-layers-base');
+        if (!base) return false;
+        var labels = Array.prototype.filter.call(base.querySelectorAll('label'), function (l) {
+            return l.textContent.trim().indexOf('Imagery ') === 0;
+        });
+        if (!labels.length) return false;
+        var group = document.createElement('div');
+        var header = document.createElement('div');
+        header.textContent = '\u25B8 Historical imagery';
+        header.style.cssText = 'cursor:pointer;font-weight:600;padding:2px 0;';
+        var body = document.createElement('div');
+        body.style.cssText = 'display:none;margin-left:14px;';
+        labels[0].parentNode.insertBefore(group, labels[0]);
+        group.appendChild(header);
+        group.appendChild(body);
+        labels.forEach(function (l) { body.appendChild(l); });
+        header.addEventListener('click', function () {
+            var open = body.style.display !== 'none';
+            body.style.display = open ? 'none' : 'block';
+            header.textContent = (open ? '\u25B8' : '\u25BE') + ' Historical imagery';
+        });
+        return true;
+    }
+    var tries = 0;
+    var timer = setInterval(function () {
+        if (group() || ++tries > 40) clearInterval(timer);
+    }, 100);
+})();
+</script>
+"""
+
+
+def _add_historical_grouping(m):
+    """Fold the Wayback base layers of a map into a collapsible layer-control section."""
+    m.get_root().html.add_child(folium.Element(HISTORICAL_GROUP_JS))
+
+
 # Base imagery shared by every web map in the app (Data & Cleaning and Location Estimate).
 GOOGLE_SATELLITE = dict(tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google',
-                        max_zoom=25, name='Google Hybrid')
+                        max_zoom=25, name='Google Satellite')
 
 
 def add_satellite_layer(m, **options):
@@ -147,6 +192,8 @@ def build_map(df, value_column='BT', caption=None, vmin=None, vmax=None, colors=
     #north arrow below the zoom buttons
     m.get_root().html.add_child(folium.Element(NORTH_ARROW_HTML))
     m.get_root().header.add_child(folium.Element(CONTROL_BACKGROUND_CSS))
+    if historical:
+        _add_historical_grouping(m)
     #creating temporary html file to allow for >2MB datasets
     temp_map = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
     temp_map.close()
@@ -321,6 +368,7 @@ def build_analysis_map(clean_df, score_points, clusters, summary, reference_poin
     #north arrow and control backgrounds, matching build_map
     m.get_root().html.add_child(folium.Element(NORTH_ARROW_HTML))
     m.get_root().header.add_child(folium.Element(CONTROL_BACKGROUND_CSS))
+    _add_historical_grouping(m)
 
     map_path = Path(tempfile.gettempdir()) / 'smartmagmapper_anomaly_cluster_map.html'
     m.save(str(map_path))
