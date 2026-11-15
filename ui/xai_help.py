@@ -132,7 +132,7 @@ def show_feature_help(owner, key='overview'):
 
 
 def show_picked_feature(owner, event):
-    """Open a definition when its chart bar or label is clicked."""
+    """Open a definition associated with the selected explanation element."""
     key = getattr(event.artist, '_xai_feature_key', None)
 
     if key in FEATURE_HELP:
