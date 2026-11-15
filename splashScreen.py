@@ -81,8 +81,8 @@ if __name__ == "__main__":
     splash.showMessage("Unzipping files", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
     app.processEvents()
 
-    zf = MyZipFile(os.path.join(bundle_dir, 'ui.zip'),'r')
-    extractDir = os.path.join(bundle_dir, 'ui')
+    zf = MyZipFile(os.path.join(bundle_dir, 'gui.zip'),'r')
+    extractDir = os.path.join(bundle_dir, 'gui')
     if os.path.exists(extractDir):
 #        print('overwritting pyR2 dir')
         shutil.rmtree(extractDir)
@@ -111,10 +111,9 @@ if __name__ == "__main__":
 
     splash.hide()
     splash.close()
-    appDir = os.path.join(bundle_dir, 'ui', 'ui') # zip always putting a double dir ... don't know why
+    appDir = os.path.join(bundle_dir, 'gui', 'gui') # zip always putting a double dir ... don't know why
     print('Main app will be run in appDir = ', appDir)
     os.chdir(appDir)
-#    os.system(['python3', 'ui.py']) # this work fine
     if OS == 'Linux':
         os.system(os.path.join(appDir, 'SmartMagMapper'))
     else:
@@ -130,5 +129,5 @@ if __name__ == "__main__":
 """ NOTE
 This approach increase significantly the size of the package.
 Another approach would be to load all modules in this script and just unzip the
-sources and run `python ui.py`.
+sources and run `python GUI.py`.
 """
