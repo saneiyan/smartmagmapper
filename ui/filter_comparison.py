@@ -204,9 +204,12 @@ class FilterComparison(QWidget):
         self.session_changed();name=self.selected_name();item=self.slots.get(name);session=self.lab.get_session()
         if item is None or session is None:self.notify('Select a stored result in the list first.');return False
         r=deepcopy(item['result'])
-        # A chained snapshot is only reusable while its recorded input history still matches.
-        if r.settings['field']=='Current result' and r.settings.get('input_history',[])!=session.filter_history:
-            self.notify('The chained input changed. Preview again using the desired input field.');return False
+        if r.settings.get('field') not in ('Total magnitude', 'X', 'Y', 'Z'):
+            self.notify(
+                'This stored result uses an unsupported input. '
+                'Select a signal and generate a new filter preview.'
+            )
+            return False
         self.lab.method.setCurrentText(r.settings['method'])
         self.lab.field.setCurrentIndex(max(0,self.lab.field.findData(r.settings['field'])))
         self.lab.domain.setCurrentText(r.settings['domain'])
