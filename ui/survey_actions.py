@@ -18,11 +18,14 @@ class SurveyActionsMixin:
     """
 
     def commit_filter_result(self,frame,settings):
-        if settings['field'] != 'Current result':
-            self.active_filters = []
-        filters=self.active_filters + [settings['method']]
-        self.filtered_scale_changed(frame,filters=filters,parameters=settings,replace_history=settings['field']!='Current result',
-            status_message='Filter Lab working data updated.')
+        filters = [settings['method']]
+        self.filtered_scale_changed(
+            frame,
+            filters=filters,
+            parameters=settings,
+            replace_history=True,
+            status_message='Filter Lab working data updated.'
+        )
 
     def suggested_cleaning(self, session):
         """Data-based startup / MAD suggestion for a survey, computed once and kept on the session."""
