@@ -19,6 +19,6 @@ xarray
 rasterio
 xlrd
 # Saved Random Forest model and SHAP explanations
-shap==0.46.0
-joblib==1.4.2
-numba==0.60.0
+shap
+joblib
+numba
