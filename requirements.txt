@@ -1,4 +1,4 @@
-# XAI model tested with Python 3.11.9
+# tested with Python =< 3.14
 PyQt6
 PyQt6-WebEngine
 matplotlib
@@ -18,7 +18,6 @@ harmonica
 xarray
 rasterio
 xlrd
-# Saved Random Forest model and SHAP explanations
 shap
 joblib
 numba
