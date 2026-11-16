@@ -1,17 +1,17 @@
-
 # XAI model tested with Python 3.11.9
 PyQt6
 PyQt6-WebEngine
 matplotlib
-numpy==1.26.4
+numpy
 pandas
 openpyxl
 scipy
-scikit-learn==1.9.1
+scikit-learn
 pyproj
 vmdpy
 utm
 folium
+concave-hull
 branca
 ppigrf
 harmonica
