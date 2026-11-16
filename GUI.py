@@ -3,26 +3,29 @@
 Run `python GUI.py`, optionally followed by a survey or project file to open. The main window builds the window
 and its tabs; tab and action logic comes from the mixin modules in ui/, and data processing lives in processing/.
 """
-import sys
+import sys, os
 import threading
 import traceback
 from pathlib import Path
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QApplication, QMessageBox, QLabel, QMainWindow, QStatusBar, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QComboBox, QTabWidget
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-from ui.project_tools import ProjectTools
-from ui.filter_workspace import FilterWorkspace
-from ui.data_workspace import DataWorkspace
-from ui.confirm import confirm
-from ui.map_field import MAP_VIEWS, TOTAL_FIELD, RESIDUAL_TREND, RESIDUAL_IGRF, FIELD_CHOICES
+from PyQt6.QtGui import QFont, QIcon, QPixmap
+from PyQt6.QtWidgets import (QApplication, QMessageBox, QLabel, QMainWindow, QStatusBar, QWidget, QProgressBar,
+                            QVBoxLayout, QHBoxLayout, QLineEdit, QComboBox, QTabWidget, QSplashScreen)
 from ui.survey_actions import SurveyActionsMixin
 from ui.analysis_tab import AnalysisTabMixin
 from ui.location_tab import LocationTabMixin
 from ui.map_field import MapFieldMixin
 from ui.exports import ExportsMixin
 
+
+frozen = 'not'
+if getattr(sys, 'frozen', False):
+        # we are running in a bundle
+        frozen = 'ever so'
+        bundle_dir = sys._MEIPASS
+else:
+        # we are running in a normal Python environment
+        bundle_dir = os.path.dirname(os.path.abspath(__file__))
 
 class MainWindow(SurveyActionsMixin, AnalysisTabMixin, LocationTabMixin, MapFieldMixin, ExportsMixin, QMainWindow):
     """Main window: builds the window and its tabs; the tab and action logic comes from the mixins."""
@@ -355,12 +358,52 @@ if __name__ == '__main__':
     catchErrors() # prevent crash of the app
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
+    app.setWindowIcon(QIcon(os.path.join(bundle_dir, 'imgs/logo_s.png')))
+
+    splash_pix = QPixmap(os.path.join(bundle_dir, 'imgs/logo_s.png'))
+    splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
+    splash.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+    splash.setEnabled(False)
+
+    # adding progress bar
+    progressBar = QProgressBar(splash)
+    progressBar.setMaximum(10)
+    progressBar.setGeometry(100, splash_pix.height() - 50, splash_pix.width() - 200, 20)
+    splash.show()
+    splash.showMessage("Loading libraries", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
+    app.processEvents()
+    progressBar.setValue(1)
+    app.processEvents()
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    progressBar.setValue(2)
+    app.processEvents()
+    from matplotlib.figure import Figure
+    progressBar.setValue(3)
+    app.processEvents()
+    from ui.project_tools import ProjectTools
+    progressBar.setValue(4)
+    app.processEvents()
+    from ui.filter_workspace import FilterWorkspace
+    from ui.data_workspace import DataWorkspace
+    progressBar.setValue(5)
+    app.processEvents()
+    from ui.confirm import confirm
+    progressBar.setValue(6)
+    app.processEvents()
+    from ui.map_field import MAP_VIEWS, TOTAL_FIELD, RESIDUAL_TREND, RESIDUAL_IGRF, FIELD_CHOICES
+    progressBar.setValue(7)
+    app.processEvents()
     from ui.theme import apply_matplotlib_theme
     apply_matplotlib_theme()
     from processing.data_analysis_pipeline import SmartMagMapper_version
+    progressBar.setValue(8)
+    app.processEvents()
     app.setApplicationName('SmartMagMapper')
     app.setApplicationVersion(SmartMagMapper_version)
     app.setApplicationDisplayName('SmartMagMapper') 
+    progressBar.setValue(9)
+    app.processEvents()
+
     window = MainWindow()
     window.setWindowTitle(f"{app.applicationName()} v{app.applicationVersion()}")
     window.show()
@@ -369,4 +412,9 @@ if __name__ == '__main__':
         if Path(startup_file).suffix.lower() in ('.smmproj','.bak1','.bak2','.bak3'):
             QTimer.singleShot(250, lambda: window.project_tools.open_project(path=Path(startup_file)))
         else:QTimer.singleShot(250, lambda: window.load_survey_file(startup_file))
+
+    splash.showMessage("SmartMagMapper is ready!", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
+    progressBar.setValue(10)
+    app.processEvents()
+    splash.hide() # hiding the splash screen when finished
     sys.exit(app.exec())
