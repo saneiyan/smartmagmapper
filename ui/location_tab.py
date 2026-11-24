@@ -9,6 +9,7 @@ import branca.colormap as cm
 from pathlib import Path
 from ui.theme import color_scale_combo, color_list
 from ui.data_workspace import DataWorkspace
+from ui.busy import loading
 from processing import web_map as wm
 from processing import data_analysis_pipeline as dap
 import tempfile
@@ -21,10 +22,17 @@ class LocationTabMixin:
     """
 
     def create_location_tab(self):
+        """Build the Location Estimate tab.
+
+        The location map and web map views are moved here from the Automated Anomaly Analysis tab, next to the analysis
+        summary, with Map Type and Colour Scale dropdowns.
+
+        Returns
+        -------
+        QWidget
+            The tab page.
+        """
         page=QWidget();layout=QVBoxLayout(page)
-        # The selected workspace tab supplies its heading.
-        self.location_headline=QLabel('Inspect the anomaly evidence first. Location estimates appear here after analysis.')
-        self.location_headline.setWordWrap(True);self.location_headline.hide()
         # Map Type and Colour Scale dropdowns, matching the Data & Cleaning cleaning maps.
         options=QHBoxLayout();options.addStretch(1)
         options.addWidget(QLabel('Map Type:'))
@@ -57,7 +65,13 @@ class LocationTabMixin:
         return page
 
     def location_map_changed(self, *_):
-        """Show the chosen Location Estimate map type and redraw it with the chosen colour scale."""
+        """Show the chosen Location Estimate map type and redraw it with the chosen colour scale.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         web = self.location_map_type.currentText() == 'Web Map'
         self.location_views.setCurrentIndex(1 if web else 0)
         results = getattr(self, 'location_results', None)
@@ -70,6 +84,33 @@ class LocationTabMixin:
             self.plot_analysis_engineering_map(clean_df, score_points, clusters)
 
     def plot_analysis_engineering_map(self, clean_df, score_points, clusters):
+        """Draw the location map with a loading message over it (see _draw_location_map).
+
+        Parameters
+        ----------
+        clean_df : pandas.DataFrame
+            Analysed survey.
+        score_points : pandas.DataFrame
+            Score windows.
+        clusters : pandas.DataFrame
+            Clusters, with the selected candidate flagged.
+        """
+        with loading(self.analysis_cluster_canvas, 'Drawing location map...'):
+            self._draw_location_map(clean_df, score_points, clusters)
+
+    def _draw_location_map(self, clean_df, score_points, clusters):
+        """Draw the location map: survey track, window scores (points or contours), hit windows, clusters,
+        the selected candidate and the reference location, in UTM metres.
+
+        Parameters
+        ----------
+        clean_df : pandas.DataFrame
+            Analysed survey.
+        score_points : pandas.DataFrame
+            Score windows.
+        clusters : pandas.DataFrame
+            Clusters, with the selected candidate flagged.
+        """
         contour = getattr(self, 'location_map_type', None) is not None and self.location_map_type.currentText() == 'Contour Plot'
         cmap = self.location_colors.currentData() if hasattr(self, 'location_colors') else 'RdYlBu_r'
         self.analysis_cluster_figure.clear()
@@ -81,7 +122,7 @@ class LocationTabMixin:
             linewidth=0.6 if contour else 1.0,
             alpha=0.6 if contour else 0.9,
             label='survey track',
-            zorder=3 if contour else 1,  # over the contours, under the scatter points
+            zorder=3 if contour else 1,
         )
         if score_points is not None and not score_points.empty:
             scores = score_points['score'].to_numpy(dtype=float)
@@ -165,6 +206,20 @@ class LocationTabMixin:
         self.analysis_cluster_canvas.draw_idle()
 
     def refresh_analysis_web_map(self, clean_df, score_points, clusters, summary):
+        """Build the satellite web map of the analysis: track, scored windows, clusters with pop-ups, the
+        candidate's uncertainty circle and the reference location.
+
+        Parameters
+        ----------
+        clean_df : pandas.DataFrame
+            Analysed survey.
+        score_points : pandas.DataFrame
+            Score windows.
+        clusters : pandas.DataFrame
+            Clusters, with the selected candidate flagged.
+        summary : dict
+            Analysis summary (centres the map on the candidate).
+        """
         if not hasattr(self, 'analysis_web_map') or clean_df is None or clean_df.empty:
             return
         try:

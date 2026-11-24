@@ -10,7 +10,6 @@ scipy
 scikit-learn
 pyproj
 vmdpy
-utm
 folium
 branca
 ppigrf

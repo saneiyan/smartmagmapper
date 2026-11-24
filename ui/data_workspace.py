@@ -17,11 +17,23 @@ from processing import web_map as WebMap
 from processing.map_maker import MapMaker
 from ui.theme import compact_toolbar, TabArrows, color_scale_combo, color_list
 from ui.confirm import confirm
+from ui.busy import loading, watch_web_view
 from processing import labels
 from processing.labels import FIELD_COLUMNS, field_label
 
 class DataWorkspace(QWidget):
+    """Data & Cleaning tab: cleaning settings, cleaning maps (before / after), data tables and signal plots.
+
+    Each data column has one colour/axis scale shared by its cleaning map and signal plot; the scale boxes follow
+    the plot on screen.
+
+    Parameters
+    ----------
+    window : GUI.MainWindow
+        Main window (active survey, status bar, cleaning actions).
+    """
     def __init__(self, window):
+        """Build the cleaning settings panel, the scale boxes and the three views."""
         super().__init__(); self.window=window;self.raw=None;self.raw_session=None
         root=QVBoxLayout(self)
         # The selected workspace tab supplies its heading.
@@ -78,7 +90,6 @@ class DataWorkspace(QWidget):
         page=QWidget();plot_layout=QVBoxLayout(page);plot_layout.setContentsMargins(0,0,0,0)
         self.toolbar=NavigationToolbar2QT(self.canvas,page);toolbar=self.toolbar;compact_toolbar(toolbar)
         plot_layout.addWidget(toolbar);plot_layout.addWidget(self.canvas,1)
-        self.map_page=page
         self.map_style=QComboBox();self.map_style.addItems(['Scatter Plot','Contour Plot','Web Map'])
         self.map_stage=QComboBox();self.map_stage.addItems(['Synchronized Data (Before Cleaning)','Cleaned Data (After Cleaning)']);self.map_stage.setCurrentIndex(1)
         map_options=QHBoxLayout()
@@ -103,6 +114,7 @@ class DataWorkspace(QWidget):
         self.web_comparison=QWebEngineView()
         # Satellite tiles are remote; the map html is a local temp file.
         self.web_comparison.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls,True)
+        watch_web_view(self.web_comparison,'Loading satellite web map...')
         plot_layout.addWidget(self.web_comparison,1);self.web_comparison.hide()
         self.tabs.addTab(page,'Cleaning Maps')
         self.cleaned_table=QTableView();self.cleaned_table.setAlternatingRowColors(True)
@@ -144,18 +156,40 @@ class DataWorkspace(QWidget):
         self.form.addRow(self.update_cleaning)
 
     def cleaning_values(self):
-        """(startup samples, MAD multiplier, fallback percentile) as entered in the Cleaning Settings panel."""
+        """Cleaning settings as entered in the panel.
+
+        Returns
+        -------
+        tuple
+            (startup samples, MAD multiplier, fallback percentile).
+        """
         return int(self.startup_samples.value()),float(self.spatial_mad.value()),float(self.fallback_percentile.value())
 
     def set_cleaning_values(self,startup=None,multiplier=None,percentile=None):
-        """Show cleaning settings without marking them as a pending change (None leaves a box as it is)."""
+        """Show cleaning settings without marking them as a pending change.
+
+        Parameters
+        ----------
+        startup : int, optional
+            Startup samples removed.
+        multiplier : float, optional
+            Spatial MAD multiplier.
+        percentile : float, optional
+            Percentile fallback. None leaves a box as it is.
+        """
         blockers=[QSignalBlocker(box) for box in (self.startup_samples,self.spatial_mad,self.fallback_percentile)]
         for box,value in ((self.startup_samples,startup),(self.spatial_mad,multiplier),(self.fallback_percentile,percentile)):
             if value is not None:box.setValue(value)
         del blockers
 
     def show_survey(self,cleaned):
-        """Show a survey's cleaned data: the Cleaned Data table and a fresh total-field signal plot."""
+        """Show a survey's cleaned data: the Cleaned Data table and a fresh total-field signal plot.
+
+        Parameters
+        ----------
+        cleaned : pandas.DataFrame
+            Cleaned survey.
+        """
         signals_blocked=self.plot_tabs.blockSignals(True)
         try:
             self.plot_tabs.clear()
@@ -165,7 +199,13 @@ class DataWorkspace(QWidget):
             self.plot_tabs.blockSignals(signals_blocked)
 
     def show_cleaned_table(self,df):
-        """Fill the Cleaned Data table (sortable; rows labelled with their synchronized record number)."""
+        """Fill the Cleaned Data table (sortable; rows labelled with their synchronized record number).
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            Cleaned survey.
+        """
         model=TableModel.TableModel(df,row_labels=self.record_labels(df))
         proxy=QSortFilterProxyModel(self.cleaned_table);proxy.setSourceModel(model);proxy.setSortRole(Qt.ItemDataRole.EditRole)
         self.cleaned_model=model
@@ -173,7 +213,13 @@ class DataWorkspace(QWidget):
         self.cleaned_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
 
     def open_signal_plot(self,column):
-        """Open (or switch to) the signal plot for a cleaned-data column and bring the Signal Plots tab forward."""
+        """Open (or switch to) the signal plot for a cleaned-data column and bring the Signal Plots tab forward.
+
+        Parameters
+        ----------
+        column : str
+            Column name.
+        """
         session=self.window.active_session()
         if session is not None and column in session.cleaned:
             frame=session.cleaned
@@ -182,13 +228,29 @@ class DataWorkspace(QWidget):
             self.tabs.setCurrentWidget(self.signal_page)
 
     def close_signal_plot(self,index):
-        """Close only this display; the survey column remains available to reopen."""
+        """Close only this display; the survey column remains available to reopen.
+
+        Parameters
+        ----------
+        index : int
+            Tab index of the plot.
+        """
         page=self.plot_tabs.widget(index)
         if page is None:return
         self.plot_tabs.removeTab(index);page.deleteLater()
 
     def new_plot(self,df,name,column=None):
-        """Add a signal plot (column versus time) as a new tab, or switch to it if it is already open."""
+        """Add a signal plot (column versus time) as a new tab, or switch to it if it is already open.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            Data to plot.
+        name : str
+            Tab name for columns that are not magnetic field values.
+        column : pandas.Series, optional
+            The column to plot; nothing happens without it.
+        """
         if column is None:return
         for index in range(self.plot_tabs.count()):
             if getattr(self.plot_tabs.widget(index),'signal_column',None)==getattr(column,'name',None):
@@ -201,6 +263,16 @@ class DataWorkspace(QWidget):
         layout.addWidget(toolbar);layout.addWidget(canvas,1)
         page.canvas=canvas;page.column=column;page.df=df;page.signal_column=getattr(column,'name',None);page.title=name+' versus time'
         def draw_signal(frame,style):
+            """Redraw this signal plot from a data frame, marking samples removed by cleaning and using the
+            column's shared scale.
+
+            Parameters
+            ----------
+            frame : pandas.DataFrame
+                Cleaned or synchronized data.
+            style : {'Line', 'Scatter'}
+                Plot style.
+            """
             key=page.signal_column
             if key not in frame:return
             axes.clear();x=frame['Time (s)'];y=frame[key]
@@ -229,6 +301,13 @@ class DataWorkspace(QWidget):
         self.scale_label.setText(self.scale_title(self.scale_column))
 
     def update_context_controls(self,*_):
+        """Show the controls that apply to the current view (signal and scale for maps and signal plots).
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         self.form.setRowVisible(self.signal,self.tabs.currentIndex()==0)
         # Scale applies to Cleaning Maps (0) and Signal Plots (2), not the data tables.
         self.form.setRowVisible(self.scale_widget,self.tabs.currentIndex() in (0,2))
@@ -236,22 +315,55 @@ class DataWorkspace(QWidget):
 
     @property
     def applied_scale(self):
+        """Applied (min, max) text of the column the scale boxes point at; ('', '') when automatic."""
         return self.scales.get(self.scale_column,('',''))
 
     @applied_scale.setter
     def applied_scale(self,texts):
+        """Set the applied (min, max) text of the column the scale boxes point at.
+
+        Parameters
+        ----------
+        texts : tuple of str
+            (min text, max text).
+        """
         if self.scale_column is not None:self.scales[self.scale_column]=tuple(texts)
 
     def map_column(self):
+        """Column shown on the cleaning map.
+
+        Returns
+        -------
+        str
+            For example 'BT' or 'X'.
+        """
         return self.signal.currentData()
 
     @staticmethod
     def scale_title(column):
+        """Label of the scale boxes.
+
+        Parameters
+        ----------
+        column : str or None
+            Column the boxes point at.
+
+        Returns
+        -------
+        str
+            For example 'Total Magnetic Field (BT) (nT) scale'.
+        """
         if column is None:return 'Scale (no plot shown)'
         return f'{field_label(column)} scale'
 
     def update_scale_context(self,*_):
-        """Point the scale boxes at the plot on screen and show its limits."""
+        """Point the scale boxes at the plot on screen and show its limits.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         index=self.tabs.currentIndex() if hasattr(self,'tabs') else 0
         if index==0:column=self.map_column()
         elif index==2:column=getattr(self.plot_tabs.currentWidget(),'signal_column',None)
@@ -263,8 +375,31 @@ class DataWorkspace(QWidget):
         self.scale_text_changed()
 
     def field_scale(self,column=None):
-        """Applied limits for a column (default: the one shown) as (min, max); None means automatic."""
+        """Applied limits for a column.
+
+        Parameters
+        ----------
+        column : str, optional
+            Column; defaults to the one shown.
+
+        Returns
+        -------
+        tuple
+            (min, max); None means automatic. Both are None if min is not below max.
+        """
         def value(text):
+            """Number in a scale box, or None when empty or not a number.
+
+            Parameters
+            ----------
+            text : str
+                Box text.
+
+            Returns
+            -------
+            float or None
+                The value.
+            """
             try:return float(text) if text else None
             except ValueError:return None
         # Only applied values count, so redraws never pick up half-typed entries.
@@ -274,14 +409,39 @@ class DataWorkspace(QWidget):
         return lo,hi
 
     def scale_text(self):
+        """Text currently typed in the scale boxes.
+
+        Returns
+        -------
+        tuple of str
+            (min text, max text), stripped.
+        """
         return (self.scale_min.text().strip(),self.scale_max.text().strip())
 
     def scale_text_changed(self,*_):
         # Apply is only available while the boxes differ from what is displayed.
+        """Enable Apply Scale only while the boxes differ from the applied scale.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         self.scale_apply.setEnabled(self.scale_text()!=self.applied_scale)
 
     def auto_field_scale(self,column=None):
-        """Full range of a column over the before/after cleaning data, rounded outward to a tidy step (any unit)."""
+        """Full range of a column over the before/after cleaning data, rounded outward to a tidy step (any unit).
+
+        Parameters
+        ----------
+        column : str, optional
+            Column; defaults to the one the scale boxes point at.
+
+        Returns
+        -------
+        tuple of float or None
+            (min, max), or None without data.
+        """
         column=self.scale_column if column is None else column
         session=self.window.active_session()
         if session is None or column is None:return None
@@ -294,6 +454,13 @@ class DataWorkspace(QWidget):
         return low,high
 
     def scale_edited(self,*_):
+        """Apply the typed scale to the column's map and signal plot.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         current=self.scale_text()
         if current==self.applied_scale:return
         self.applied_scale=current;self.scale_apply.setEnabled(False)
@@ -306,21 +473,41 @@ class DataWorkspace(QWidget):
         self.draw();self.redraw_signal_plots()
 
     def auto_scale_text(self):
+        """Automatic scale as text, with as many decimals as the rounding step needs.
+
+        Returns
+        -------
+        tuple of str
+            (min text, max text); scientific notation for very small units (e.g. tesla).
+        """
         auto=self.auto_field_scale()
         if not auto:return ('','')
         decimals=labels.step_decimals(getattr(self,'_auto_step',0.01))
-        if decimals>8:return (f'{auto[0]:.4g}',f'{auto[1]:.4g}')  # very small units (e.g. tesla): scientific notation
+        if decimals>8:return (f'{auto[0]:.4g}',f'{auto[1]:.4g}')
         return (f'{auto[0]:.{decimals}f}',f'{auto[1]:.{decimals}f}')
 
     def fill_auto_scale(self,only_empty=False):
-        """Show the data range in the boxes and treat it as the applied scale (no redraw)."""
+        """Show the data range in the boxes and treat it as the applied scale (no redraw).
+
+        Parameters
+        ----------
+        only_empty : bool, optional
+            Fill only empty boxes, keeping set limits and pending edits.
+        """
         auto=self.auto_scale_text();applied=list(self.applied_scale)
         for i,edit in enumerate((self.scale_min,self.scale_max)):
-            if only_empty and applied[i]:continue  # leave set limits (and any pending edit) alone
+            if only_empty and applied[i]:continue
             applied[i]=auto[i];edit.blockSignals(True);edit.setText(auto[i]);edit.blockSignals(False)
         self.applied_scale=tuple(applied);self.scale_text_changed()
 
     def reset_scale(self,*_):
+        """Auto Scale: after confirmation, set the boxes to the full data range and apply it.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         texts=self.auto_scale_text()
         title=self.scale_title(self.scale_column)
         full_range=f' ({texts[0]} to {texts[1]})' if texts[0] else ''
@@ -331,6 +518,13 @@ class DataWorkspace(QWidget):
         self.scale_edited()
 
     def sync_signal_column(self,*_):
+        """Show the column of the selected signal plot in the Signal Column dropdown.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         page=self.plot_tabs.currentWidget()
         if page is None:return
         index=self.column_picker.findData(getattr(page,'signal_column',None))
@@ -338,6 +532,13 @@ class DataWorkspace(QWidget):
             self.column_picker.blockSignals(True);self.column_picker.setCurrentIndex(index);self.column_picker.blockSignals(False)
 
     def update_signal_columns(self, frame):
+        """Fill the Signal Column dropdown with the numeric columns of a survey.
+
+        Parameters
+        ----------
+        frame : pandas.DataFrame
+            Cleaned survey.
+        """
         selected=self.column_picker.currentData()
         self.column_picker.blockSignals(True);self.column_picker.clear()
         excluded={'Time (s)','UTM_EPSG'}
@@ -350,16 +551,33 @@ class DataWorkspace(QWidget):
         if current is not None and current!='BT':self.new_plot(name=current,df=frame,column=frame[current])
 
     def show_signal_column(self,*_):
+        """Signal Column dropdown changed: open that column's plot.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         column=self.column_picker.currentData()
         if column is not None:self.open_signal_plot(column)
 
     def set_cleaning_pending(self,pending):
+        """Mark the Update Cleaning Settings button as having changes to apply (or not).
+
+        Parameters
+        ----------
+        pending : bool
+            Whether the cleaning settings differ from the displayed data.
+        """
         if not hasattr(self,'update_cleaning'):return
         self.update_cleaning.setEnabled(pending)
         self.update_cleaning.setText('Update Cleaning Settings *' if pending else 'Update Cleaning Settings')
 
     def restore_defaults(self):
-        """Restore the survey's data-based suggestion (fixed defaults 10 / 6.0 only if there is no suggestion)."""
+        """Restore the survey's data-based suggestion (fixed defaults 10 / 6.0 only if there is no suggestion).
+
+        The restored values take effect when Update Cleaning Settings is clicked.
+        """
         w=self.window;session=w.active_session()
         suggestion=w.suggested_cleaning(session) if session is not None else {}
         startup=suggestion.get('startup_samples',10)
@@ -376,7 +594,15 @@ class DataWorkspace(QWidget):
         self.startup_samples.setValue(startup);self.spatial_mad.setValue(multiplier);self.fallback_percentile.setValue(95)
 
     def load_session(self,session):
-        """Load a newly active survey's synchronized data and tables (once per survey)."""
+        """Load a newly active survey's synchronized data and tables (once per survey).
+
+        Every column's scale is reset, since a different survey has different ranges and possibly a different unit.
+
+        Parameters
+        ----------
+        session : processing.survey_session.SurveySession
+            Active survey.
+        """
         if self.raw_session is session and self.raw is not None:return
         self.raw,_=dap.clean_survey(session.magnetometer,session.location,self.window.analysis_params(),synchronized_only=True)
         self.raw_session=session
@@ -386,6 +612,7 @@ class DataWorkspace(QWidget):
         self.scales.clear();self.update_scale_context()
 
     def refresh(self):
+        """Update the tab for the active survey: cleaning report and suggestion, available signals, maps and plots."""
         session=self.window.active_session()
         if session is None:return
         self.load_session(session)
@@ -405,6 +632,18 @@ class DataWorkspace(QWidget):
         self.redraw_signal_plots()
 
     def record_labels(self,frame):
+        """Synchronized record number of each row of a frame (to label cleaned rows by their original record).
+
+        Parameters
+        ----------
+        frame : pandas.DataFrame
+            Cleaned survey.
+
+        Returns
+        -------
+        list of int or None
+            Row labels, or None without a survey or time column.
+        """
         session=self.window.active_session()
         if session is None or 'Time (s)' not in frame:return None
         self.load_session(session)
@@ -413,24 +652,59 @@ class DataWorkspace(QWidget):
 
     @staticmethod
     def set_table(table,frame):
+        """Show a data frame in a table view.
+
+        Parameters
+        ----------
+        table : QTableView
+            Table to fill.
+        frame : pandas.DataFrame
+            Data.
+        """
         table.setModel(TableModel.TableModel(frame));table.setAlternatingRowColors(True)
 
     def excluded_rows(self,frame):
-        """Rows of the before-cleaning data that cleaning removed (empty for any other frame)."""
+        """Rows of the before-cleaning data that cleaning removed (empty for any other frame).
+
+        Parameters
+        ----------
+        frame : pandas.DataFrame
+            Data being drawn.
+
+        Returns
+        -------
+        pandas.DataFrame or None
+            Removed rows, an empty frame, or None when `frame` is None.
+        """
         session=self.window.active_session()
         if session is None or frame is None or frame is not self.raw or 'Time (s)' not in frame:return frame.iloc[0:0] if frame is not None else None
         return frame.loc[~frame['Time (s)'].isin(session.cleaned['Time (s)'])]
 
     def redraw_signal_plots(self,*_):
+        """Redraw every signal plot from the chosen data (cleaned or synchronized) and style.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         session=self.window.active_session()
         if session is None:return
         frame=self.raw if self.signal_source.currentIndex()==1 else session.cleaned
         if frame is None:return
-        for index in range(self.plot_tabs.count()):
-            page=self.plot_tabs.widget(index)
-            if hasattr(page,'draw_signal'):page.draw_signal(frame,self.signal_style.currentText())
+        pages=[self.plot_tabs.widget(index) for index in range(self.plot_tabs.count())]
+        with loading([getattr(page,'canvas',None) for page in pages],'Drawing signal plot...'):
+            for page in pages:
+                if hasattr(page,'draw_signal'):page.draw_signal(frame,self.signal_style.currentText())
 
     def draw(self,*_):
+        """Redraw the cleaning map (scatter, contour or web map) with the current settings.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         session=self.window.active_session()
         if session is None or self.raw is None:return
         col=self.map_column()
@@ -440,11 +714,26 @@ class DataWorkspace(QWidget):
         self.canvas.setVisible(not web);self.toolbar.setVisible(not web);self.web_comparison.setVisible(web)
         if web:
             self.draw_web_maps(session.cleaned,self.excluded_rows(self.raw),col,lo,hi);return
-        self.render_map(self.figure,self.map_stage.currentIndex(),self.map_style.currentText(),col,lo,hi)
+        stage='synchronized data' if self.map_stage.currentIndex()==0 else 'processed dataset'
+        with loading(self.canvas,f'Drawing {self.map_style.currentText().lower()} of the {stage}...'):
+            self.render_map(self.figure,self.map_stage.currentIndex(),self.map_style.currentText(),col,lo,hi)
         self.toolbar.update();self.canvas.draw_idle()
 
     def map_limits(self,col,update_boxes=False):
-        """Colour limits for a column: the before/after data range, replaced by any applied user scale."""
+        """Colour limits for a column: the before/after data range, replaced by any applied user scale.
+
+        Parameters
+        ----------
+        col : str
+            Column.
+        update_boxes : bool, optional
+            Also show the limits in the scale boxes (when they point at this column).
+
+        Returns
+        -------
+        tuple of float
+            (min, max).
+        """
         session=self.window.active_session()
         values=np.concatenate([self.raw[col].to_numpy(),session.cleaned[col].to_numpy()])
         lo,hi=float(np.nanmin(values)),float(np.nanmax(values))
@@ -460,10 +749,22 @@ class DataWorkspace(QWidget):
         return lo,hi
 
     def render_map(self,figure,stage_index,style,col,lo,hi,cmap=None):
-        """Draw one cleaning-map view into figure (used for the screen and for exports).
+        """Draw one cleaning-map view into a figure (used for the screen and for exports).
 
-        stage_index 0 = synchronized data (before cleaning), 1 = cleaned data; style is 'Scatter Plot' or 'Contour Plot';
-        cmap defaults to the Colour Scale dropdown.
+        Parameters
+        ----------
+        figure : matplotlib.figure.Figure
+            Figure to draw into (cleared first).
+        stage_index : {0, 1}
+            0 = synchronized data (before cleaning, removed samples marked), 1 = cleaned data.
+        style : {'Scatter Plot', 'Contour Plot'}
+            Map type.
+        col : str
+            Column to colour by.
+        lo, hi : float
+            Colour limits.
+        cmap : str, optional
+            Colour map; defaults to the Colour Scale dropdown.
         """
         cmap=cmap or self.map_colors.currentData()
         session=self.window.active_session()
@@ -496,6 +797,21 @@ class DataWorkspace(QWidget):
 
     @staticmethod
     def draw_contour(ax,x,y,z,lo,hi,cmap='viridis'):
+        """Filled contours of scattered values, clipped to the survey outline.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Axes to draw on.
+        x, y : array_like
+            Positions.
+        z : array_like
+            Values (non-finite values are skipped).
+        lo, hi : float
+            Contour range (25 levels).
+        cmap : str, optional
+            Colour map.
+        """
         keep=np.isfinite(np.asarray(z,dtype=float))
         x,y,z=np.asarray(x,dtype=float)[keep],np.asarray(y,dtype=float)[keep],np.asarray(z,dtype=float)[keep]
         if len(np.unique(np.column_stack([x,y]),axis=0))<3:return
@@ -503,6 +819,19 @@ class DataWorkspace(QWidget):
         except (ValueError,RuntimeError):pass
 
     def draw_web_maps(self,cleaned,removed,col,lo,hi):
+        """Show the satellite web map of the chosen cleaning stage with the same colours and limits as the map.
+
+        Parameters
+        ----------
+        cleaned : pandas.DataFrame
+            Cleaned survey.
+        removed : pandas.DataFrame
+            Samples removed by cleaning (marked on the before-cleaning map).
+        col : str
+            Column to colour by.
+        lo, hi : float
+            Colour limits.
+        """
         before=self.map_stage.currentIndex()==0
         frame=self.raw if before else cleaned
         # Same colour scale and limits as the scatter/contour colour bar.

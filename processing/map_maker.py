@@ -1,3 +1,7 @@
+"""Survey maps: outline clipping, contour maps, inverse-distance gridding and georeferenced GeoTIFF export.
+
+No PyQt; usable from scripts. showMap draws a quick map in longitude/latitude; saveMap writes a GeoTIFF.
+"""
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -6,11 +10,10 @@ import matplotlib.tri as mtri
 from scipy.interpolate import griddata
 from scipy.spatial import Delaunay
 from scipy.spatial import ConvexHull
-import pyproj
 from processing import labels
 
-# Optional packages (not in requirements.txt):
-# falling back or explaining what to install when a feature needs one.
+# Optional packages: concave-hull and pykrige are not in requirements.txt; without them the outline falls back to
+# the convex hull and kriging is not offered. rasterio (in requirements.txt) is needed for GeoTIFF export.
 try:
     from concave_hull import concave_hull_indexes
 except ImportError:
@@ -26,21 +29,33 @@ except ImportError:
     OrdinaryKriging = None
 
 class MapMaker:
+    """Map drawing and GeoTIFF export for survey data.
+
+    Parameters
+    ----------
+    fp : pandas.DataFrame, str or None
+        Default survey data for saveMap (a data frame or a CSV path); None when the data are always passed in.
+    """
     def __init__(self, fp):
+        """Keep the default survey data (see the class description)."""
         self.fp = fp
 
     def clipConvexHull(self, xdata, ydata, x, y, z):
-        """Set to nan data outside the convex hull of xdata, ydata
+        """Set interpolated values outside the convex hull of the measurements to NaN.
 
         Parameters
         ----------
-            xdata, ydata (arrays) : x and y position of the data collected
-            x, y (arrays) : x and y position of the computed interpolation points
-            z (arrays) : value of the interpolation
+        xdata, ydata : array_like
+            Positions of the measurements.
+        x, y : array_like
+            Positions of the interpolated points.
+        z : array_like
+            Interpolated values.
 
         Returns
         -------
-            znew (array) : a copy of z with nan when outside convexHull
+        numpy.ndarray
+            Copy of `z` with NaN outside the convex hull.
         """
         knownPoints = np.unique(np.array([xdata, ydata], dtype=float).T, axis=0)
         hull = Delaunay(knownPoints[ConvexHull(knownPoints).vertices])
@@ -51,25 +66,23 @@ class MapMaker:
 
 
     def clipConcaveHull(self, xdata, ydata, x, y, z):
-        """Clip according to concave hull.
+        """Set interpolated values outside the concave hull (outline) of the measurements to NaN.
+
+        Falls back to the convex hull when the optional concave-hull package is not installed.
 
         Parameters
         ----------
-        xdata : array_like
-            X positions collected.
-        ydata : array_like
-            Y positions collected.
-        x : array_like
-            X positions of interpolated points
-        y : array_like
-            Y positions of interpolated points
+        xdata, ydata : array_like
+            Positions of the measurements.
+        x, y : array_like
+            Positions of the interpolated points.
         z : array_like
-            Z values of interpolated points
+            Interpolated values.
 
         Returns
         -------
-        znew : array_like
-            Z values with NaN outside of the concave hull
+        numpy.ndarray
+            Copy of `z` with NaN outside the hull.
         """
         if concave_hull_indexes is None:
             print('concave-hull not installed, will use convexhull instead. Install it with `pip install concave-hull`')
@@ -99,31 +112,28 @@ class MapMaker:
         return znew
 
     def tricontourf_clipped(self, x, y, z, ax=None, **kwargs):
-        """Adaption of matplotlib tricontourf with mask inside concave hull.
-        Note the additional 'ax' argument to specify the axis.
+        """Filled contour map (matplotlib tricontourf) masked to the concave hull of the data.
+
+        Without the concave-hull package the unmasked tricontourf is drawn.
 
         Parameters
         ----------
-        x : array_like
-            X values.
-        y : array_like
-            Y values.
+        x, y : array_like
+            Positions.
         z : array_like
-            Z values.
-        ax : maplotlib.axes.Axes
-            Matplotlib axes.
-        kwargs : optional
-            Additional keyword arguments passed to tricontourf.
+            Values.
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw on; a new figure is created when not given.
+        **kwargs
+            Passed to tricontourf (levels, cmap, extend...).
 
         Returns
         -------
-        cax :
-            Output of matplotlib tricontourf.
+        matplotlib.contour.TriContourSet
+            The contour set (for a colour bar).
         """
         if ax is None:
-            fig, ax = plt.subplots()
-        else:
-            fig = ax.figure
+            _, ax = plt.subplots()
 
         if concave_hull_indexes is None:
             print('concave-hull not installed, will use normal tricontourf instead. Install it with `pip install concave-hull`')
@@ -132,7 +142,6 @@ class MapMaker:
 
         # make a triangulation
         triang = mtri.Triangulation(x, y)
-
 
         # compute triangles centroids
         centroid = np.mean([triang.x[triang.triangles], triang.y[triang.triangles]], axis=-1).T
@@ -162,7 +171,22 @@ class MapMaker:
 
     @staticmethod
     def idw(xnew, ynew, xknown, yknown, zknown, n=1):
-        '''Inverse Distance Weighting (n is the distance power; 2 is the common choice).'''
+        """Inverse distance weighting interpolation.
+
+        Parameters
+        ----------
+        xnew, ynew : array_like
+            Positions to interpolate to.
+        xknown, yknown, zknown : numpy.ndarray
+            Measurement positions and values.
+        n : float, optional
+            Distance power (2 is the common choice).
+
+        Returns
+        -------
+        numpy.ndarray
+            Interpolated values; a point on a measurement takes that measurement.
+        """
         znew = np.zeros(len(xnew))
         for i,(x,y) in enumerate(zip(xnew, ynew)):
             dist = np.sqrt((x-xknown)**2+(y-yknown)**2)
@@ -175,166 +199,45 @@ class MapMaker:
         return znew
 
 
-    def convertFromCoord(df, targetProjection=None):
-        """Convert coordinates string (NMEA or DMS) to selected CRS projection.
+    def showMap(self, df, contour=False, ax=None, vmin=None, vmax=None, pts=False, cmap='viridis',
+                xlab='Longitude (°)', ylab='Latitude (°)', levels=None, cbar_label=None):
+        """Map of the total field (BT) in longitude/latitude, as points or filled contours.
 
         Parameters
         ----------
         df : pandas.DataFrame
-            Dataframe with a 'latitude' and 'longitude' columns that contains NMEA
-            string.
-        targetProjection : str, optional
-            Target CRS, in EPSG number: e.g. `targetProjection='EPSG:3395'`
-            for the British Grid. If None, only WGS84 decimal degree will be returned.
+            Survey with 'Longitude (°)', 'Latitude (°)' and 'BT'.
+        contour : bool, optional
+            Draw filled contours (clipped to the survey outline) instead of points.
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw on; a new figure is created when not given.
+        vmin, vmax : float, optional
+            Colour limits; the 2nd and 98th percentiles when not given.
+        pts : bool, optional
+            With contours, also mark the measurement positions.
+        cmap : str, optional
+            Matplotlib colour map name.
+        xlab, ylab : str, optional
+            Axis labels.
+        levels : array_like, optional
+            Contour levels; 8 levels from vmin to vmax when not given.
+        cbar_label : str, optional
+            Colour bar label; defaults to the total-field label in the display unit.
+
+        Returns
+        -------
+        matplotlib.figure.Figure or None
+            The new figure when `ax` was not given, otherwise None.
         """
-
-        def NMEA(arg):
-            """ Convert NMEA string to WGS84 (GPS) decimal degree.
-            """
-            try:
-                letter = arg[-1]
-                if (letter == 'W') | (letter == 'S'):
-                    sign = -1
-                else:
-                    sign = 1
-                arg = arg[:-1]
-                x = arg.index('.')
-                a = float(arg[:x-2]) # degree
-                b = float(arg[x-2:]) # minutes
-                return (a + b/60)*sign
-            except Exception as e:
-                print('ERROR in NMEA string conversion, will set NaN instead')
-                return np.nan
-
-        def DMS(arg):
-            """Convert convert degrees, minutes, seconds to decimal degrees
-            """
-            letter = arg[-1]
-            if (letter == 'W') | (letter == 'S'):
-                sign = -1
-            else:
-                sign = 1
-            #extract degrees from string
-            deg_idx = arg.find('°')
-            deg = int(arg[:deg_idx])
-            #extract minutes from string
-            min_idx = arg.find("'")
-            mins = int(arg[(deg_idx+1):min_idx])
-            #extract seconds from string
-            sec_idx = arg.find('"')
-            secs = float(arg[(min_idx+1):sec_idx])
-            DD = deg + (mins/60) + (secs/3600) # decimal degree calculation
-            return sign*DD # return with sign
-
-        def gps2gps(x):
-            return float(x)
-
-        check = df['latitude'].values[0]
-        if not isinstance(check, float):
-            if check.find('°') !=-1 and check.find("'") != -1:
-                print("Coordinates appear to be given as Degrees, minutes, seconds ... adjusting conversion scheme")
-                gps2deg = np.vectorize(DMS)
-            elif any([a in check for a in ['N','S','W','E']]):
-                print('Coordinates converted from NMEA string')
-                gps2deg = np.vectorize(NMEA)
-            else:  # assume in decimal degree
-                gps2deg = np.vectorize(gps2gps)
-        else:
-            gps2deg = np.vectorize(gps2gps)
-
-        df['lat'] = gps2deg(df['latitude'].values)
-        df['lon'] = gps2deg(df['longitude'].values)
-
-        # in case some values were not well converted, drop the NaN rows
-        df = df[df['lat'].notnull() & df['lon'].notnull()].reset_index(drop=True)
-
-        if targetProjection is not None:
-            try:
-                transformer = pyproj.Transformer.from_crs('EPSG:4326', targetProjection, always_xy=True)
-                df['x'], df['y'] = transformer.transform(
-                    df['lon'].values, df['lat'].values)
-                # wgs84 = pyproj.Proj("EPSG:4326") # LatLon with WGS84 datum used by GPS units and Google Earth
-                # targetCRS = pyproj.Proj(targetProjection) # target EPSG
-                # df['x'], df['y'] = pyproj.transform(wgs84, targetCRS,
-                #                   df['lat'].values, df['lon'].values)
-            except Exception as e:
-                raise ValueError('You may need to upgrade pyproj (pip install -U pyproj) to have Transformer')
-        else:  # set decimal degree as x,y if no projection given
-            df['x'] = df['lon']
-            df['y'] = df['lat']
-
-        return df
-
-    def showMap(self, df, contour=False, ax=None, vmin=None, vmax=None, cax=None,
-                    pts=False, cmap='viridis', xlab='x', ylab='y', levels=[],
-                    cbar_label=None):
-            """ Display a map of the measurements.
-
-            Parameters
-            ----------
-            df : pandas.DataFrame
-                DataFrame containing x, y (converted coordinates), and bt (total magnetic field)
-            contour : bool, optional
-                If `True` filled contour will be plotted using `tricontourf`.
-            ax : Matplotlib.Axes, optional
-                If specified, the graph will be plotted against the axis.
-            vmin : float, optional
-                Minimum of the colorscale.
-            vmax : float, optional
-                Maximum of the colorscale.
-            pts : bool, optional
-                If `True` the measurements location will be plotted on the graph.
-            xlab : str, optional
-                X label.
-            ylab : str, optional
-                Y label.
-            levels list of float, optional
-                If `contour == True`, levels are the contour intervals.
-            """
-            #self.df = pd.read_excel(self.fp)
-            #links to ExcelReader Class without overriding the df
-            self.df = df
-            x = self.df['Longitude (°)'].values
-            y = self.df['Latitude (°)'].values
-            val = self.df['BT'].values
-            inan = ~np.isnan(val)
-            val = val[inan]
-            x = x[inan]
-            y = y[inan]
-            if ax is None:
-                fig, ax = plt.subplots()
-            else:
-                fig = ax.figure
-            if vmin is None:
-                vmin = np.nanpercentile(val, 2)
-            if vmax is None:
-                vmax = np.nanpercentile(val, 98)
- #           ax.set_title(coil)
-            if contour is True:
-                if len(levels) == 0:
-                    #not rounded to whole µT, which repeated levels and failed for ranges under ~7 µT
-                    levels = np.linspace(vmin, vmax, 8)
-                # cax = ax.tricontourf(x, y, val, levels=levels, extend='both', cmap=cmap)
-                cax = self.tricontourf_clipped(x, y, val, ax=ax, levels=levels, extend='both', cmap=cmap)
-                if pts is True:
-                    ax.plot(x, y, 'k+')
-            else:
-                cax = ax.scatter(x, y, s=15, c=val, vmin=vmin, vmax=vmax, cmap=cmap)
-            ax.set_xlabel('Longitude (°)')
-            ax.set_ylabel('Latitude (°)')
-            if len(x) > 0:
-                ax.set_xlim([np.nanmin(x), np.nanmax(x)])
-                ax.set_ylim([np.nanmin(y), np.nanmax(y)])
-            ax.get_xaxis().get_major_formatter().set_useOffset(False) # prevent exponent notation
-            ax.get_yaxis().get_major_formatter().set_useOffset(False)
-            ax.get_xaxis().get_major_formatter().set_scientific(False)
-            ax.get_yaxis().get_major_formatter().set_scientific(False)
-            fig.colorbar(cax, ax=ax, label=cbar_label or labels.total_field_label())
-            if ax is None:
-                return fig
-
-    def meshMap(self, ax=None, vmax=None,vmin=None, xmesh=None, ymesh=None, val=None, levels=None):
-        if ax is None:
+        x = df['Longitude (°)'].values
+        y = df['Latitude (°)'].values
+        val = df['BT'].values
+        inan = ~np.isnan(val)
+        val = val[inan]
+        x = x[inan]
+        y = y[inan]
+        created = ax is None
+        if created:
             fig, ax = plt.subplots()
         else:
             fig = ax.figure
@@ -342,18 +245,31 @@ class MapMaker:
             vmin = np.nanpercentile(val, 2)
         if vmax is None:
             vmax = np.nanpercentile(val, 98)
-        levels = np.linspace(vmin, vmax, 14)
-        #plt.figure(figsize=(10, 6))
-        contour_plot = ax.contourf(xmesh, ymesh, val, cmap='viridis')
-        fig.colorbar(contour_plot, ax=ax, label=labels.total_field_label())
-        plt.xlabel('Easting')
-        plt.ylabel('Northing')
-        plt.title('Original BT')
-        return fig
+        if contour is True:
+            if levels is None or len(levels) == 0:
+                #evenly spaced levels in any unit (rounding to whole units repeated levels for small ranges)
+                levels = np.linspace(vmin, vmax, 8)
+            cax = self.tricontourf_clipped(x, y, val, ax=ax, levels=levels, extend='both', cmap=cmap)
+            if pts is True:
+                ax.plot(x, y, 'k+')
+        else:
+            cax = ax.scatter(x, y, s=15, c=val, vmin=vmin, vmax=vmax, cmap=cmap)
+        ax.set_xlabel(xlab)
+        ax.set_ylabel(ylab)
+        if len(x) > 0:
+            ax.set_xlim([np.nanmin(x), np.nanmax(x)])
+            ax.set_ylim([np.nanmin(y), np.nanmax(y)])
+        ax.get_xaxis().get_major_formatter().set_useOffset(False)
+        ax.get_yaxis().get_major_formatter().set_useOffset(False)
+        ax.get_xaxis().get_major_formatter().set_scientific(False)
+        ax.get_yaxis().get_major_formatter().set_scientific(False)
+        fig.colorbar(cax, ax=ax, label=cbar_label or labels.total_field_label())
+        if created:
+            return fig
 
     def saveMap(self, fname, df=None, value_column='BT', cell_size=None, method='linear',
                 projection='utm', output='values', cmap='viridis', vmin=None, vmax=None,
-                nlevel=256, nx=100, ny=100, units='µT'):
+                nlevel=256, nx=100, ny=100, units='µT', description=None, tags=None):
         """Save a georeferenced raster (GeoTIFF) of a survey field on a north-up grid.
 
         Parameters
@@ -380,6 +296,11 @@ class MapMaker:
             Colour map, colour limits (default: data range) and number of colours for output='rgba'.
         nx, ny : int, optional
             Grid size when cell_size is None.
+        description : str, optional
+            What the values are, e.g. 'Total Magnetic Field (BT) (nT) → High-pass'. Written as the band description and
+            a 'description' tag; defaults to value_column.
+        tags : dict, optional
+            Extra metadata tags written to the file, e.g. the dataset name and the processing history.
 
         Returns
         -------
@@ -447,11 +368,14 @@ class MapMaker:
         # top-left corner of the top-left cell
         transform = from_origin(gx[0] - xres / 2, gy[0] + yres / 2, xres, yres)
         profile = dict(driver='GTiff', height=nrows, width=ncols, crs=crs, transform=transform, compress='deflate')
+        description = description or value_column
+        extra = {key: str(value) for key, value in (tags or {}).items()}
         if output == 'values':
             with rasterio.open(fname, 'w', count=1, dtype='float32', nodata=np.nan, **profile) as dst:
                 dst.write(z.astype('float32'), 1)
-                dst.set_band_description(1, value_column)
+                dst.set_band_description(1, description)
                 dst.update_tags(1, field=value_column, units=units, interpolation=method)
+                dst.update_tags(description=description, **extra)
         elif output == 'rgba':
             lo = np.nanmin(z) if vmin is None else vmin
             hi = np.nanmax(z) if vmax is None else vmax
@@ -459,9 +383,11 @@ class MapMaker:
             rgba = (255 * rgba).astype('uint8')
             rgba[..., 3] = np.where(np.isfinite(z), 255, 0)
             with rasterio.open(fname, 'w', count=4, dtype='uint8', **profile) as dst:
-                for band in range(4):  # red, green, blue, alpha
+                #red, green, blue, alpha
+                for band in range(4):
                     dst.write(rgba[:, :, band], band + 1)
-                dst.update_tags(field=value_column, units=units, interpolation=method, color_min=str(lo), color_max=str(hi), colormap=cmap)
+                dst.update_tags(field=value_column, units=units, interpolation=method, color_min=str(lo), color_max=str(hi), colormap=cmap,
+                                description=description, **extra)
         else:
             raise ValueError("output must be 'values' or 'rgba'.")
         return {'width': ncols, 'height': nrows, 'crs': crs, 'cell_size_x': xres, 'cell_size_y': yres}

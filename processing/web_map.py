@@ -1,4 +1,4 @@
-"""Folium web maps of survey data (no PyQt: usable from scripts). The on-screen widget is ui.web_map_widget."""
+"""Folium web maps of survey data (no PyQt: usable from scripts); the app shows them in a QWebEngineView."""
 import tempfile
 from processing import labels
 import folium
@@ -41,27 +41,48 @@ GOOGLE_SATELLITE = dict(tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z
 
 
 def add_satellite_layer(m, **options):
-    '''Add the Google satellite imagery layer to a folium map (options such as show=True pass through).'''
+    """Add the Google satellite imagery layer to a folium map.
+
+    Parameters
+    ----------
+    m : folium.Map
+        Map to add the layer to.
+    **options
+        Passed to folium.TileLayer, e.g. show=True.
+    """
     folium.TileLayer(**GOOGLE_SATELLITE, **options).add_to(m)
 
 
 def build_map(df, value_column='BT', caption=None, vmin=None, vmax=None, colors=None,
               excluded=None, excluded_name='Excluded Positions', layer_name='Points', zoom=18):
-    '''Builds the satellite web map and saves it to a temporary html file.
+    """Build the satellite web map of survey points and save it to a temporary html file.
 
-    Parameters:
+    Parameters
     ----------
-        df (DataFrame): Survey points with 'Latitude (°)', 'Longitude (°)' and value_column.
-        value_column (str, optional): Column used to colour the points. Defaults to 'BT'.
-        caption (str, optional): Colour scale caption (default: the column's label in the current unit).
-        vmin, vmax (float, optional): Colour scale limits, 2nd/98th percentile when not given.
-        colors (list, optional): Colour ramp; defaults to blue, green, yellow.
-        excluded (DataFrame, optional): Points drawn as red outlined markers on their own layer.
+    df : pandas.DataFrame
+        Survey points with 'Latitude (°)', 'Longitude (°)' and `value_column`.
+    value_column : str, optional
+        Column used to colour the points.
+    caption : str, optional
+        Colour scale caption; defaults to the column's label in the current unit.
+    vmin, vmax : float, optional
+        Colour scale limits; the 2nd and 98th percentiles when not given.
+    colors : list of str, optional
+        Colour ramp; defaults to blue, green, yellow.
+    excluded : pandas.DataFrame, optional
+        Points drawn as red outlined markers on their own layer (e.g. positions removed by cleaning).
+    excluded_name : str, optional
+        Layer name of the excluded points.
+    layer_name : str, optional
+        Layer name of the survey points.
+    zoom : int, optional
+        Initial zoom level.
 
-    Returns:
+    Returns
     -------
-        str: Path of the saved html file.
-    '''
+    str
+        Path of the saved html file (a temporary file, so maps of large surveys are not limited by Qt's 2 MB html limit).
+    """
     x = df['Longitude (°)']
     y = df['Latitude (°)']
     bt = df[value_column]
@@ -98,6 +119,22 @@ def build_map(df, value_column='BT', caption=None, vmin=None, vmax=None, colors=
 
 def color_map(bt, vmin=None, vmax=None, colors=None):
     #use the regular map's scale when one was set, otherwise the same default range
+    """Linear colour map for the web map's points and legend.
+
+    Parameters
+    ----------
+    bt : array_like
+        Values to be coloured.
+    vmin, vmax : float, optional
+        Colour limits; the 2nd and 98th percentiles of `bt` when not given or when vmin >= vmax.
+    colors : list of str, optional
+        Colour ramp; defaults to blue, green, yellow.
+
+    Returns
+    -------
+    branca.colormap.LinearColormap
+        The colour map.
+    """
     lo = vmin if vmin is not None else np.nanpercentile(bt, 2)
     hi = vmax if vmax is not None else np.nanpercentile(bt, 98)
     if lo >= hi:

@@ -1,3 +1,14 @@
+"""Survey import, synchronization, cleaning and automated anomaly analysis (no PyQt; usable from scripts).
+
+Typical use::
+
+    from processing import data_analysis_pipeline as dap
+    mag, gps = dap.read_survey_file('survey.xlsx')
+    cleaned, audit = dap.clean_survey(mag, gps, dap.AnalysisParams())
+
+Magnetic values are used in whatever unit they were recorded in; every step is scale-invariant, so nT, µT, mT,
+T, G and mG surveys give the same anomalies and candidate locations.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,31 +30,112 @@ except Exception:
 
 
 def utm_epsg(lat: float, lon: float) -> int:
-    """EPSG code of the WGS84 UTM zone containing (lat, lon), e.g. 32618 for zone 18N."""
+    """EPSG code of the WGS 84 UTM zone containing a position.
+
+    Parameters
+    ----------
+    lat, lon : float
+        Position in decimal degrees.
+
+    Returns
+    -------
+    int
+        For example 32618 for zone 18N (326xx north, 327xx south).
+    """
     zone = min(max(int((float(lon) + 180.0) // 6.0) + 1, 1), 60)
     return (32600 if float(lat) >= 0 else 32700) + zone
 
 
 def utm_zone_label(epsg: int) -> str:
-    """Readable zone name for an EPSG code from utm_epsg, e.g. '18N'."""
+    """Readable UTM zone name for an EPSG code from utm_epsg.
+
+    Parameters
+    ----------
+    epsg : int
+        WGS 84 UTM EPSG code, e.g. 32618.
+
+    Returns
+    -------
+    str
+        For example '18N'.
+    """
     return f"{epsg % 100}{'N' if epsg < 32700 else 'S'}"
 
 
 @lru_cache(maxsize=None)
 def _utm_transformers(epsg: int) -> tuple[Transformer, Transformer]:
+    """Cached coordinate transformers between WGS 84 and a UTM zone.
+
+    Parameters
+    ----------
+    epsg : int
+        WGS 84 UTM EPSG code.
+
+    Returns
+    -------
+    to_utm : pyproj.Transformer
+        (longitude, latitude) -> (easting, northing).
+    to_wgs84 : pyproj.Transformer
+        (easting, northing) -> (longitude, latitude).
+    """
     to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
     to_wgs84 = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
     return to_utm, to_wgs84
 
 
 def survey_epsg(df: pd.DataFrame) -> int:
-    """UTM zone chosen for a survey by clean_survey, stored so every step uses the same zone."""
+    """UTM zone chosen for a survey by clean_survey, stored so every step uses the same zone.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Cleaned survey with a 'UTM_EPSG' column.
+
+    Returns
+    -------
+    int
+        EPSG code of the survey's UTM zone.
+    """
     return int(df["UTM_EPSG"].iloc[0])
 
 
 @dataclass
 class AnalysisParams:
     #optional coordinates of a known reference location (e.g. a known target), used only for display and offsets, never for candidate selection
+    """Settings for cleaning and automated anomaly analysis.
+
+    Attributes
+    ----------
+    reference_lat, reference_lon : float or None
+        Optional known reference location (e.g. a known target) in decimal degrees. Used only for display and
+        offsets, never for choosing the candidate.
+    startup_samples : int
+        Synchronized samples removed at the start of the survey.
+    spatial_mad_multiplier : float
+        Positions farther than median radius + multiplier x radial MAD from the survey centre are rejected.
+    spatial_fallback_percentile : float
+        Radial percentile limit used instead when the radial MAD is zero.
+    window_length_m : float
+        Length of the anomaly-score windows along the survey path, in metres.
+    step_ratio : float
+        Window step as a fraction of the window length.
+    gamma : float
+        Score threshold = median + gamma x MAD of the window scores.
+    dbscan_eps_m : float
+        DBSCAN neighbourhood radius for grouping hit windows, in metres.
+    dbscan_min_samples : int
+        DBSCAN minimum number of hit windows per cluster.
+    vmd_modes : int
+        Number of VMD modes.
+    vmd_alpha : float
+        VMD bandwidth penalty.
+    max_selected_modes : int
+        Maximum number of modes kept for scoring.
+    support_fraction : float
+        A cluster needs at least this fraction of the largest cluster's windows to be eligible as the candidate.
+    min_support_points : int
+        Minimum number of windows for an eligible cluster.
+    """
     reference_lat: float | None = None
     reference_lon: float | None = None
     startup_samples: int = 10
@@ -62,11 +154,25 @@ class AnalysisParams:
 
     @property
     def reference_known(self) -> bool:
+        """True when both reference coordinates were entered."""
         return self.reference_lat is not None and self.reference_lon is not None
 
 
 def reference_utm(params: AnalysisParams, epsg: int) -> tuple[float, float] | None:
-    """Reference location in the survey's UTM zone, or None if none was entered."""
+    """Reference location in the survey's UTM zone.
+
+    Parameters
+    ----------
+    params : AnalysisParams
+        Settings holding the optional reference latitude and longitude.
+    epsg : int
+        The survey's UTM EPSG code.
+
+    Returns
+    -------
+    tuple of float or None
+        (easting, northing) in metres, or None if no reference was entered.
+    """
     if not params.reference_known:
         return None
     east, north = _utm_transformers(epsg)[0].transform(params.reference_lon, params.reference_lat)
@@ -74,7 +180,20 @@ def reference_utm(params: AnalysisParams, epsg: int) -> tuple[float, float] | No
 
 
 def add_reference_distance(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
-    """Add each point's distance to the entered reference location, if one was entered."""
+    """Add each point's distance to the entered reference location.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Cleaned survey with Easting/Northing columns.
+    params : AnalysisParams
+        Settings holding the optional reference location.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Copy with a 'Distance_to_Reference_m' column, or `df` itself when no reference was entered.
+    """
     reference = reference_utm(params, survey_epsg(df))
     if reference is None:
         return df
@@ -87,6 +206,18 @@ def add_reference_distance(df: pd.DataFrame, params: AnalysisParams) -> pd.DataF
 
 
 def _flat_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Copy of a data frame with string column names (MultiIndex headers joined with '_').
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Table read from a survey file.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Copy with flat, string column names.
+    """
     out = df.copy()
     if isinstance(out.columns, pd.MultiIndex):
         out.columns = ["_".join(str(part) for part in col if str(part) != "nan").strip("_") for col in out.columns]
@@ -96,6 +227,18 @@ def _flat_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _norm(text: Any) -> str:
+    """Normalise a column name for matching: lower case, no spaces, brackets, underscores or degree signs.
+
+    Parameters
+    ----------
+    text : object
+        Column name or alias.
+
+    Returns
+    -------
+    str
+        Normalised text ('µ' becomes 'u', 'deg' becomes 'degree').
+    """
     return (
         str(text)
         .lower()
@@ -116,6 +259,30 @@ def _norm(text: Any) -> str:
 
 
 def _find_column(df: pd.DataFrame, aliases: list[str], required: bool = True) -> str | None:
+    """Find the column matching one of several aliases.
+
+    Exact (normalised) matches are tried first, then partial matches; names shorter than three characters
+    only match exactly, so 'X' never matches 'Max'.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Table to search.
+    aliases : list of str
+        Accepted names, most specific first.
+    required : bool, optional
+        Raise if nothing matches.
+
+    Returns
+    -------
+    str or None
+        The matching column name, or None when not found and not required.
+
+    Raises
+    ------
+    ValueError
+        If `required` and no column matches.
+    """
     normalized = {_norm(col): col for col in df.columns}
     for alias in aliases:
         key = _norm(alias)
@@ -132,6 +299,18 @@ def _find_column(df: pd.DataFrame, aliases: list[str], required: bool = True) ->
 
 
 def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """Copy of a data frame with every column converted to numbers (unreadable values become NaN).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Table to convert.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Numeric copy.
+    """
     out = df.copy()
     for col in out.columns:
         out[col] = pd.to_numeric(out[col], errors="coerce")
@@ -146,6 +325,21 @@ def _standardize_magnetometer(df: pd.DataFrame) -> pd.DataFrame:
 
     Values are kept as recorded. The unit written in the source headers (e.g. 'X (nT)'), if any, is put in
     out.attrs['field_unit'] (None when the headers give no unit).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Raw magnetometer table.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Standardised stream without non-finite rows.
+
+    Raises
+    ------
+    ValueError
+        If no time column or magnetic field column can be found.
     """
     df = _flat_columns(df)
     time_col = _find_column(df, ["Mag_Time (s)", "Magnetometer_Time (s)", "Time (s)", "time"])
@@ -170,6 +364,23 @@ def _standardize_magnetometer(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _standardize_location(df: pd.DataFrame) -> pd.DataFrame:
+    """GPS stream with columns Loc_Time (s), Latitude (°) and Longitude (°).
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Raw GPS table (coordinates in decimal degrees).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Standardised stream without rows missing a time or coordinate.
+
+    Raises
+    ------
+    ValueError
+        If the time, latitude or longitude column cannot be found.
+    """
     df = _flat_columns(df)
     time_col = _find_column(df, ["Loc_Time (s)", "Location_Time (s)", "GPS Time", "Time (s)", "time"])
     lat_col = _find_column(df, ["Latitude (degree)", "Latitude (°)", "Location_Latitude (°)", "latitude", "lat"])
@@ -180,6 +391,20 @@ def _standardize_location(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _find_standard_sheet(sheets: dict[str, pd.DataFrame], kind: str) -> pd.DataFrame | None:
+    """Find the magnetometer or GPS sheet of an Excel workbook by its name or headers.
+
+    Parameters
+    ----------
+    sheets : dict of str to pandas.DataFrame
+        Workbook sheets.
+    kind : {'mag', 'loc'}
+        Which sheet to look for.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        The sheet, or None if none matches.
+    """
     for name, df in sheets.items():
         lower_name = str(name).lower()
         cols = " ".join(str(col).lower() for col in df.columns)
@@ -191,6 +416,31 @@ def _find_standard_sheet(sheets: dict[str, pd.DataFrame], kind: str) -> pd.DataF
 
 
 def read_survey_file(path: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Read a survey file into standardised magnetometer and GPS streams.
+
+    Excel workbooks may hold the streams on separate sheets (e.g. 'Magnetometer' and 'Location') or on one;
+    CSV and text files hold both in one table. Coordinates must be in decimal degrees (the Import Data dialog
+    converts other formats).
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        .xls, .xlsx, .xlsm, .csv or .txt file.
+
+    Returns
+    -------
+    mag : pandas.DataFrame
+        Magnetometer stream (see _standardize_magnetometer); mag.attrs['field_unit'] holds a unit found in the headers.
+    gps : pandas.DataFrame
+        GPS stream (see _standardize_location).
+
+    Raises
+    ------
+    FileNotFoundError
+        If the file does not exist.
+    ValueError
+        For unsupported file types or missing columns.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
@@ -210,6 +460,36 @@ def read_survey_file(path: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: AnalysisParams, *, synchronized_only=False) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Synchronize the magnetometer with GPS positions, project to UTM and remove unreliable samples.
+
+    Positions are linearly interpolated in time onto the magnetometer samples. The whole survey is projected
+    into the UTM zone of its median position. Cleaning then removes the first `startup_samples` samples and
+    positions farther from the survey centre than median radius + `spatial_mad_multiplier` x radial MAD (a
+    radial percentile when the MAD is zero). For vector data BT is computed from X, Y and Z.
+
+    Parameters
+    ----------
+    magdf, gpsdf : pandas.DataFrame
+        Magnetometer and GPS streams (raw or standardised).
+    params : AnalysisParams
+        Cleaning settings.
+    synchronized_only : bool, optional
+        Only synchronize and project (no startup or position removal), e.g. to show the data before cleaning.
+
+    Returns
+    -------
+    cleaned : pandas.DataFrame
+        Survey with Time (s), BT (and X, Y, Z), Latitude (°), Longitude (°), Easting (m), Northing (m),
+        UTM_EPSG and Distance (m) along the path.
+    audit : dict
+        Row counts before and after each step, the position limit in metres and the rule used.
+
+    Raises
+    ------
+    ValueError
+        If a stream is empty, coordinates are outside the UTM range, no magnetometer sample falls within the GPS
+        time range, or fewer than 8 samples remain.
+    """
     mag = _standardize_magnetometer(magdf)
     gps = _standardize_location(gpsdf).replace([np.inf, -np.inf], np.nan).dropna()
     if mag.empty or gps.empty:
@@ -286,7 +566,20 @@ def clean_survey(magdf: pd.DataFrame, gpsdf: pd.DataFrame, params: AnalysisParam
 
 
 def _typical_band(values: np.ndarray) -> tuple[float, float]:
-    """Typical value (median) and tolerance (3 robust standard deviations, never tighter than 20 % of the median)."""
+    """Typical value and tolerance of a series of steps.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        For example sampling intervals, step lengths or field changes.
+
+    Returns
+    -------
+    median : float
+        Median of the values.
+    tolerance : float
+        3 robust standard deviations, never tighter than 20 % of the median.
+    """
     median = float(np.nanmedian(values))
     sigma = 1.4826 * robust_mad(values)
     return median, max(3.0 * sigma, 0.2 * abs(median))
@@ -307,6 +600,22 @@ def suggest_cleaning_settings(magdf: pd.DataFrame, gpsdf: pd.DataFrame, *, stabl
     position far longer than typical) are treated as off-track; the multiplier is the smallest value (in 0.5 steps,
     plus 0.5 margin) whose radial limit keeps every on-track position. None when the radial MAD is zero
     (the percentile fallback then applies).
+
+    Parameters
+    ----------
+    magdf, gpsdf : pandas.DataFrame
+        Magnetometer and GPS streams.
+    stable_steps : int, optional
+        Number of consecutive typical steps that marks the end of the startup.
+    max_startup_fraction : float, optional
+        Largest fraction of the survey that may be suggested as startup.
+
+    Returns
+    -------
+    dict
+        'startup_samples', 'spatial_mad_multiplier' (or None), 'median_interval_s', 'median_step_m',
+        'field_change_noise' (in the survey's unit), 'startup_reasons' (failed timing / movement / magnetic checks
+        before the cut-off), 'stable_start_found' and 'off_track_samples'.
     """
     sync, _ = clean_survey(magdf, gpsdf, AnalysisParams(), synchronized_only=True)
     t = sync["Time (s)"].to_numpy(dtype=float)
@@ -350,7 +659,7 @@ def suggest_cleaning_settings(magdf: pd.DataFrame, gpsdf: pd.DataFrame, *, stabl
         "spatial_mad_multiplier": multiplier,
         "median_interval_s": median_dt,
         "median_step_m": median_step,
-        "field_change_noise": 1.4826 * robust_mad(field_change),  # in the survey's own unit
+        "field_change_noise": 1.4826 * robust_mad(field_change),
         # how many steps before the startup cut-off failed each check (one step can fail several)
         "startup_reasons": {"timing": int((~timing_ok[:startup]).sum()), "movement": int((~movement_ok[:startup]).sum()),
                             "magnetic": int((~magnetic_ok[:startup]).sum())},
@@ -369,23 +678,77 @@ LEGACY_COMPONENT_NAMES = {"X (µT)": "X", "Y (µT)": "Y", "Z (µT)": "Z"}
 
 
 def drop_legacy_aliases(frame: pd.DataFrame) -> pd.DataFrame:
-    """Bring data saved by earlier versions up to date: drop duplicate columns, unit-free component names."""
+    """Bring data saved by earlier versions up to date.
+
+    Duplicate columns (LEGACY_ALIASES) are dropped and component columns named with a unit ('X (µT)') are renamed
+    to the unit-free names ('X').
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        Survey table from an older project.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Updated copy.
+    """
     frame = frame.drop(columns=[alias for alias, kept in LEGACY_ALIASES.items() if alias in frame and kept in frame])
     return frame.rename(columns={old: new for old, new in LEGACY_COMPONENT_NAMES.items() if old in frame and new not in frame})
 
 
 def load_and_clean(path: str | Path, params: AnalysisParams) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Read and clean a survey file in one step (convenience for scripts).
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Survey file (see read_survey_file).
+    params : AnalysisParams
+        Cleaning settings.
+
+    Returns
+    -------
+    tuple
+        (cleaned, audit) as returned by clean_survey.
+    """
     magdf, gpsdf = read_survey_file(path)
     return clean_survey(magdf, gpsdf, params)
 
 
 def robust_mad(values: np.ndarray | pd.Series) -> float:
+    """Median absolute deviation (unscaled), ignoring NaN.
+
+    Parameters
+    ----------
+    values : array_like
+        Values.
+
+    Returns
+    -------
+    float
+        median(|values - median(values)|).
+    """
     arr = np.asarray(values, dtype=float)
     med = np.nanmedian(arr)
     return float(np.nanmedian(np.abs(arr - med)))
 
 
 def dominant_rate(values: np.ndarray, dt: float) -> float:
+    """Frequency of the strongest non-zero spectral peak.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Evenly sampled signal.
+    dt : float
+        Sample spacing (seconds for time series).
+
+    Returns
+    -------
+    float
+        Dominant frequency in cycles per unit of `dt` (Hz for seconds); 0 for fewer than three samples.
+    """
     arr = np.asarray(values, dtype=float) - np.nanmean(values)
     if len(arr) < 3:
         return 0.0
@@ -398,6 +761,21 @@ def dominant_rate(values: np.ndarray, dt: float) -> float:
 
 
 def spectral_flatness(values: np.ndarray) -> float:
+    """Spectral flatness (geometric / arithmetic mean of the power spectrum).
+
+    Close to 1 for noise-like signals, close to 0 for signals dominated by a few frequencies. The log(0) guard
+    is relative to the signal's own power, so the result does not depend on the magnetic unit.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Signal.
+
+    Returns
+    -------
+    float
+        Flatness between 0 and 1.
+    """
     arr = np.asarray(values, dtype=float) - np.nanmean(values)
     power = np.abs(np.fft.rfft(arr)) ** 2
     # guard against log(0) relative to the signal's own power, so any unit (T ... nT) gives the same result
@@ -406,6 +784,20 @@ def spectral_flatness(values: np.ndarray) -> float:
 
 
 def median_speed_and_dt(df: pd.DataFrame) -> tuple[float, float]:
+    """Typical walking speed and sampling interval of a survey.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Survey with Time (s), Easting (m) and Northing (m).
+
+    Returns
+    -------
+    speed : float
+        Median speed in m/s (at least 0.01; 0.05 when it cannot be computed).
+    dt : float
+        Median sampling interval in seconds (at least 0.001; 1.0 when it cannot be computed).
+    """
     ordered = df.sort_values("Time (s)")
     t = ordered["Time (s)"].to_numpy(dtype=float)
     e = ordered["Easting (m)"].to_numpy(dtype=float)
@@ -425,6 +817,30 @@ def median_speed_and_dt(df: pd.DataFrame) -> tuple[float, float]:
 
 
 def run_vmd_modes(df: pd.DataFrame, params: AnalysisParams, field_column: str = "BT") -> tuple[np.ndarray, pd.DataFrame, list[int]]:
+    """Decompose a survey's field into VMD modes and choose the anomaly-bearing ones.
+
+    The signal is centred on its median and divided by its standard deviation before VMD (whose convergence test
+    is absolute), then the modes are scaled back, so the decomposition is the same in any magnetic unit. Modes are
+    sorted from slowest to fastest. Without vmdpy a moving-average band split is used instead.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Survey with Time (s), Easting (m), Northing (m) and `field_column`.
+    params : AnalysisParams
+        VMD settings (vmd_modes, vmd_alpha, max_selected_modes).
+    field_column : str, optional
+        Column to decompose.
+
+    Returns
+    -------
+    modes : numpy.ndarray
+        Array of shape (n_modes, n_samples), in the field's unit, time-ordered.
+    metrics : pandas.DataFrame
+        Per-mode metrics (see mode_metrics) with 'selected' and 'original_vmd_order_zero_based' columns.
+    selected_modes : list of int
+        1-based numbers of the modes used for anomaly scoring.
+    """
     ordered = df.sort_values("Time (s)").reset_index(drop=True)
     signal = ordered[field_column].to_numpy(dtype=float)
     signal = signal - np.nanmedian(signal)
@@ -461,6 +877,20 @@ def run_vmd_modes(df: pd.DataFrame, params: AnalysisParams, field_column: str = 
 
 
 def _fallback_modes(signal: np.ndarray, k_modes: int) -> np.ndarray:
+    """Band split used when vmdpy is not installed: successive moving-average residuals.
+
+    Parameters
+    ----------
+    signal : numpy.ndarray
+        Centred signal.
+    k_modes : int
+        Number of bands.
+
+    Returns
+    -------
+    numpy.ndarray
+        Array of shape (k_modes, n_samples).
+    """
     modes = []
     residual = np.asarray(signal, dtype=float)
     for window in np.linspace(5, 101, max(1, k_modes)).astype(int):
@@ -473,12 +903,45 @@ def _fallback_modes(signal: np.ndarray, k_modes: int) -> np.ndarray:
 
 
 def sort_modes_by_rate(modes: np.ndarray, dt: float) -> tuple[np.ndarray, list[int]]:
+    """Sort modes from the lowest to the highest dominant frequency.
+
+    Parameters
+    ----------
+    modes : numpy.ndarray
+        Array of shape (n_modes, n_samples).
+    dt : float
+        Sampling interval in seconds.
+
+    Returns
+    -------
+    sorted_modes : numpy.ndarray
+        The modes in rate order.
+    order : list of int
+        Original (zero-based) index of each sorted mode.
+    """
     rates = [dominant_rate(mode, dt) for mode in modes]
     order = np.argsort(rates)
     return modes[order], [int(i) for i in order]
 
 
 def mode_metrics(modes: np.ndarray, raw: np.ndarray, dt: float) -> pd.DataFrame:
+    """Describe each mode for automatic selection.
+
+    Parameters
+    ----------
+    modes : numpy.ndarray
+        Array of shape (n_modes, n_samples).
+    raw : numpy.ndarray
+        The decomposed signal.
+    dt : float
+        Sampling interval in seconds.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per mode: 'mode' (1-based), 'variance_ratio' (mode variance / input variance), 'dominant_rate_hz',
+        'spectral_flatness', and the flags 'noise_like', 'trend_like' and 'extreme_high_rate'.
+    """
     raw_var = float(np.nanvar(raw)) or 1.0
     rows = []
     for i, mode in enumerate(modes, start=1):
@@ -501,6 +964,23 @@ def mode_metrics(modes: np.ndarray, raw: np.ndarray, dt: float) -> pd.DataFrame:
 
 
 def select_modes(metrics: pd.DataFrame, max_modes: int = 2) -> list[int]:
+    """Choose the modes most likely to carry anomalies.
+
+    Modes flagged as noise-like, trend-like or extremely fast are skipped, as are modes with a small variance
+    ratio; the rest are ranked by variance ratio x (1 - spectral flatness).
+
+    Parameters
+    ----------
+    metrics : pandas.DataFrame
+        Output of mode_metrics.
+    max_modes : int, optional
+        Number of modes to keep.
+
+    Returns
+    -------
+    list of int
+        Selected 1-based mode numbers, in ascending order.
+    """
     candidates = metrics[
         (~metrics["noise_like"]) & (~metrics["trend_like"]) & (~metrics["extreme_high_rate"])
     ].copy()
@@ -515,11 +995,45 @@ def select_modes(metrics: pd.DataFrame, max_modes: int = 2) -> list[int]:
 
 
 def window_count_for_length(length_m: float, speed_med: float, dt_med: float) -> int:
+    """Number of samples in a score window of a given length along the path.
+
+    Parameters
+    ----------
+    length_m : float
+        Window length in metres.
+    speed_med : float
+        Typical speed in m/s.
+    dt_med : float
+        Typical sampling interval in seconds.
+
+    Returns
+    -------
+    int
+        Window length in samples, between 8 and 800.
+    """
     count = int(round((float(length_m) / speed_med) / dt_med))
     return int(np.clip(count, 8, 800))
 
 
 def sliding_rms(values: np.ndarray, window: int, step: int) -> tuple[np.ndarray, np.ndarray]:
+    """Root-mean-square of a signal in sliding windows.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Signal.
+    window : int
+        Window length in samples.
+    step : int
+        Step between window starts, in samples.
+
+    Returns
+    -------
+    centers : numpy.ndarray
+        Index of each window's centre sample.
+    rms : numpy.ndarray
+        RMS of each window.
+    """
     idxs: list[int] = []
     vals: list[float] = []
     for start in range(0, len(values) - window + 1, step):
@@ -531,6 +1045,24 @@ def sliding_rms(values: np.ndarray, window: int, step: int) -> tuple[np.ndarray,
 
 
 def score_trace(modes: np.ndarray, selected_modes: list[int], window: int, step: int) -> tuple[np.ndarray, pd.DataFrame]:
+    """Anomaly score of each window: the sum of robust z-scores of the selected modes' windowed RMS.
+
+    Parameters
+    ----------
+    modes : numpy.ndarray
+        Array of shape (n_modes, n_samples).
+    selected_modes : list of int
+        1-based numbers of the modes to score.
+    window, step : int
+        Window length and step in samples.
+
+    Returns
+    -------
+    centers : numpy.ndarray
+        Centre sample index of each window.
+    contributions : pandas.DataFrame
+        One 'z_mode_<n>' column per selected mode and their sum in 'score'.
+    """
     idx = None
     parts: dict[str, np.ndarray] = {}
     for mode_num in selected_modes:
@@ -553,6 +1085,33 @@ def analyze_with_cached_modes(
     selected_modes: list[int],
     params: AnalysisParams,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    """Score windows along the survey, find high-scoring windows and cluster them into candidates.
+
+    Parameters
+    ----------
+    clean_df : pandas.DataFrame
+        Cleaned survey (the analysis field must be the one decomposed into `modes`).
+    modes : numpy.ndarray
+        VMD modes from run_vmd_modes.
+    selected_modes : list of int
+        Modes used for scoring.
+    params : AnalysisParams
+        Window, threshold and clustering settings.
+
+    Returns
+    -------
+    score_points : pandas.DataFrame
+        One row per window: position, score, threshold, hit flag, mode contributions and cluster label.
+    clusters : pandas.DataFrame
+        One row per cluster (see cluster_hits).
+    summary : dict
+        Settings and results, including the selected candidate (see summarize_analysis).
+
+    Raises
+    ------
+    ValueError
+        If no window fits in the survey.
+    """
     ordered = clean_df.sort_values("Time (s)").reset_index(drop=True)
     speed_med, dt_med = median_speed_and_dt(ordered)
     window = window_count_for_length(params.window_length_m, speed_med, dt_med)
@@ -586,6 +1145,28 @@ def analyze_with_cached_modes(
 
 
 def cluster_hits(score_points: pd.DataFrame, params: AnalysisParams, epsg: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Group hit windows with DBSCAN and choose the candidate cluster.
+
+    Among clusters with enough support (support_fraction of the largest cluster, at least min_support_points), the
+    most compact one (smallest score-weighted RMS radius, then highest peak) is selected.
+
+    Parameters
+    ----------
+    score_points : pandas.DataFrame
+        Windows from analyze_with_cached_modes, with 'e_m', 'n_m', 'score' and 'is_hit'.
+    params : AnalysisParams
+        DBSCAN and support settings, and the optional reference location.
+    epsg : int
+        The survey's UTM EPSG code.
+
+    Returns
+    -------
+    score_points : pandas.DataFrame
+        Copy with 'cluster_label' (-1 = not clustered) and 'cluster_rank'.
+    clusters : pandas.DataFrame
+        One row per cluster: size, weighted centroid (UTM and WGS 84), peak score, uncertainty radius, elongation,
+        orientation, distance to the reference, eligibility and 'selected_by_support_compactness'.
+    """
     out = score_points.copy()
     out["cluster_label"] = -1
     out["cluster_rank"] = np.nan
@@ -593,15 +1174,15 @@ def cluster_hits(score_points: pd.DataFrame, params: AnalysisParams, epsg: int) 
         return out, pd.DataFrame()
     hit_idx = out.index[out["is_hit"]].to_numpy()
     hit_xy = out.loc[hit_idx, ["e_m", "n_m"]].to_numpy(dtype=float)
-    labels = DBSCAN(eps=float(params.dbscan_eps_m), min_samples=int(params.dbscan_min_samples)).fit_predict(hit_xy)
-    out.loc[hit_idx, "cluster_label"] = labels
+    hit_labels = DBSCAN(eps=float(params.dbscan_eps_m), min_samples=int(params.dbscan_min_samples)).fit_predict(hit_xy)
+    out.loc[hit_idx, "cluster_label"] = hit_labels
 
     reference = reference_utm(params, epsg)
     cluster_rows = []
-    for label in sorted(set(labels)):
+    for label in sorted(set(hit_labels)):
         if label < 0:
             continue
-        idx = hit_idx[labels == label]
+        idx = hit_idx[hit_labels == label]
         group = out.loc[idx]
         weights = np.maximum(group["score"].to_numpy(dtype=float), 0.0)
         if weights.sum() <= 0:
@@ -670,6 +1251,29 @@ def summarize_analysis(
     step: int,
     threshold: float,
 ) -> dict[str, Any]:
+    """Collect the analysis settings and results in one dictionary.
+
+    Parameters
+    ----------
+    clean_df : pandas.DataFrame
+        Analysed survey.
+    score_points, clusters : pandas.DataFrame
+        Results of cluster_hits.
+    selected_modes : list of int
+        Modes used for scoring.
+    params : AnalysisParams
+        Settings used.
+    window, step : int
+        Window length and step in samples.
+    threshold : float
+        Score threshold.
+
+    Returns
+    -------
+    dict
+        Sample count, UTM zone, settings, hit and cluster counts, and for a selected candidate its position,
+        radius, support, peak score and (with a reference) its distance to the reference.
+    """
     selected = clusters[clusters["selected_by_support_compactness"]] if not clusters.empty else pd.DataFrame()
     if selected.empty:
         candidate = {}
@@ -711,6 +1315,21 @@ def annotate_clean_points(
     score_points: pd.DataFrame,
     clusters: pd.DataFrame,
 ) -> pd.DataFrame:
+    """Add window scores and cluster labels to the survey samples at each window centre.
+
+    Parameters
+    ----------
+    clean_df : pandas.DataFrame
+        Analysed survey, in time order.
+    score_points, clusters : pandas.DataFrame
+        Results of cluster_hits.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Copy with Anomaly_Score, Anomaly_Threshold, Anomaly_Is_Hit, Anomaly_Cluster_Label and Anomaly_Label
+        ('background', 'selected candidate', 'secondary cluster' or 'unclustered hit').
+    """
     out = clean_df.copy()
     out["Anomaly_Score"] = np.nan
     out["Anomaly_Threshold"] = np.nan

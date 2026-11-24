@@ -8,17 +8,18 @@ This repository contains the application source code.
 
 The code is split into two packages:
 
-- `GUI.py` - the main window and the application launcher (run this file). It builds the window and its tabs; its behaviour comes from these modules in `ui/`: `survey_actions.py` (import and cleaning actions), `analysis_tab.py` (Anomaly Analysis tab), `location_tab.py` (Location Estimate tab), `map_field.py` (current map field and map filters) and `exports.py` (File > Export Data).
+- `GUI.py` - the main window and the application launcher (run this file). It builds the window and its tabs; its behaviour comes from these modules in `ui/`: `survey_actions.py` (import and cleaning actions), `analysis_tab.py` (Anomaly Analysis tab), `location_tab.py` (Location Estimate tab) and `exports.py` (File > Export Data).
 - `ui/` - the rest of the user interface (PyQt6):
   - `data_workspace.py` - the Data & Cleaning tab (cleaning settings, cleaning maps, data tables, signal plots).
   - `filter_workspace.py`, `filter_comparison.py`, `vmd_panel.py` - the Filter Lab tab.
   - `dialogs.py` - the import and export dialogs; `project_tools.py` - project files and the File/Edit/View/Tools menus.
-  - `theme.py`, `table_model.py`, `web_map_widget.py`, `busy.py`, `confirm.py` - styling, tables, the web-map view and shared pop-ups.
+  - `theme.py`, `table_model.py`, `busy.py`, `confirm.py` - styling, tables and shared pop-ups.
 - `processing/` - data processing with no PyQt6 dependency, usable from scripts:
   - `data_analysis_pipeline.py` - survey import, synchronization, cleaning, suggested cleaning settings and anomaly analysis.
-  - `scientific_filters.py` - Filter Lab filters; `map_filter.py` - map transforms (residual fields, continuation, reduction to pole, VMD).
+  - `scientific_filters.py` - Filter Lab filters (time/path-series filters, VMD, continuation and reduction to pole).
   - `geoxai_interpreter.py` - explanation layer for anomaly candidates; `survey_session.py`, `project_io.py` - survey state and project files.
-  - `map_maker.py` - maps and GeoTIFF export; `web_map.py` - web maps (folium); `comparison_spectrum.py`, `excel_reader.py` - supporting functions.
+  - `map_maker.py` - maps and GeoTIFF export; `web_map.py` - web maps (folium); `comparison_spectrum.py` - filter comparison spectra.
+  - `labels.py`, `coordinates.py` - magnetic units and display names; coordinate format conversion.
 - `requirements.txt` - Python packages needed to run the app.
 
 For example, a script can run the processing without the interface:
@@ -28,6 +29,8 @@ from processing import data_analysis_pipeline as dap
 mag, gps = dap.read_survey_file('survey.xlsx')
 cleaned, audit = dap.clean_survey(mag, gps, dap.AnalysisParams())
 ```
+
+Every function and class has a NumPy-style docstring describing its parameters and return values, e.g. `help(dap.clean_survey)`.
 
 Survey data files are not included in this repository. Each user should load survey files from their own computer using the app.
 
@@ -55,6 +58,10 @@ python GUI.py
 4. Review the cleaning, filters, anomaly analysis and location estimate in the main tabs.
 
 Survey files need magnetometer data (X/Y/Z components or total field) and GPS positions with timestamps. Excel workbooks may keep them on separate `Magnetometer` and `Location` sheets.
+
+### Reduction to pole field direction
+
+Reduction to pole (Filter Lab) needs the inclination and declination of the Earth's field at the survey. Choose the survey date and click `Estimate from IGRF` to fill them in from the IGRF model (via `ppigrf`, dates 1900-2029) at the survey's centre, or type known values. The direction used, and whether it came from IGRF, is recorded in the processing record, the exports and the GeoTIFF metadata.
 
 ### Units and coordinate formats
 

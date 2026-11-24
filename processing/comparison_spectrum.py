@@ -4,7 +4,36 @@ import pandas as pd
 from scipy.signal import welch
 
 
-def comparison_spectra(time, signals):
+def comparison_spectra(time, signals, unit='µT'):
+    """Welch power spectral densities of several signals on one shared, uniform time grid.
+
+    Duplicate times are averaged and every signal is linearly interpolated to the same uniform grid, so the
+    spectra are directly comparable.
+
+    Parameters
+    ----------
+    time : array_like
+        Sample times in seconds, shared by all signals.
+    signals : dict of str to array_like
+        Signal name -> values at `time`.
+    unit : str, optional
+        Magnetic unit of the values, recorded in the metadata as the density unit (unit^2/Hz).
+
+    Returns
+    -------
+    frequency : numpy.ndarray
+        Frequencies in Hz.
+    densities : dict of str to numpy.ndarray
+        Power spectral density of each signal.
+    metadata : dict
+        Method, sampling rate, segment length, window and other settings, for exports.
+
+    Raises
+    ------
+    ValueError
+        If the signals and times differ in length or are not finite, if there are fewer than 16 distinct times,
+        or if a time gap exceeds five median sampling intervals.
+    """
     time = np.asarray(time, dtype=float)
     values = {name: np.asarray(y, dtype=float) for name, y in signals.items()}
     if not values or any(y.shape != time.shape for y in values.values()):
@@ -29,7 +58,7 @@ def comparison_spectra(time, signals):
                                    noverlap=segment//2, detrend='constant', scaling='density')
         output[name] = density
     metadata = dict(method='Welch power spectral density', coordinate='Time',
-                    frequency_unit='Hz', density_unit='uT^2/Hz', sampling_rate_hz=float(fs),
+                    frequency_unit='Hz', density_unit=f'{unit}^2/Hz', sampling_rate_hz=float(fs),
                     uniform_samples=count, segment_samples=segment, overlap_samples=segment//2,
                     window='Hann', detrend='constant per segment',
                     resampling='duplicate times averaged; linear interpolation to common uniform grid',

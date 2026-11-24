@@ -1,3 +1,6 @@
+"""Shared look of the app: colour scale dropdowns, light figures, compact toolbars, small buttons, tab arrows
+and collapsible side panels.
+"""
 from pathlib import Path
 import numpy as np
 from matplotlib import get_data_path, colormaps
@@ -13,7 +16,18 @@ COLOR_SCALES=[('Viridis','viridis'),('Cividis','cividis'),('Plasma','plasma'),('
 
 
 def color_scale_combo(default='viridis'):
-    """Dropdown of colour scales, each shown with a small gradient preview; currentData() is the colormap name."""
+    """Dropdown of colour scales, each shown with a small gradient preview.
+
+    Parameters
+    ----------
+    default : str, optional
+        Matplotlib colour map name selected at first.
+
+    Returns
+    -------
+    QComboBox
+        The dropdown; currentData() is the colour map name.
+    """
     combo=QComboBox();combo.setIconSize(QSize(64,12))
     for label,name in COLOR_SCALES:
         rgb=np.ascontiguousarray(np.repeat((colormaps[name](np.linspace(0,1,64))[None,:,:3]*255).astype(np.uint8),12,axis=0))
@@ -25,7 +39,20 @@ def color_scale_combo(default='viridis'):
 
 
 def color_list(name,count=16):
-    """Hex colours sampled along a colormap, for web-map (folium/branca) colour scales."""
+    """Hex colours sampled along a colour map, for web-map (folium/branca) colour scales.
+
+    Parameters
+    ----------
+    name : str
+        Matplotlib colour map name.
+    count : int, optional
+        Number of colours.
+
+    Returns
+    -------
+    list of str
+        Hex colours from the low to the high end.
+    """
     return [to_hex(colormaps[name](value)) for value in np.linspace(0,1,count)]
 
 # Light, compact buttons for panel toggles and view arrows (overrides the app's navy QToolButton style).
@@ -35,6 +62,22 @@ SMALL_BUTTON_STYLE=('QToolButton{background:#f1f5f9;color:#172b4d;padding:4px 8p
 
 
 def small_tool_button(text='',arrow=None,tooltip=''):
+    """Small light tool button used for panel toggles and view arrows.
+
+    Parameters
+    ----------
+    text : str, optional
+        Button text.
+    arrow : Qt.ArrowType, optional
+        Arrow icon.
+    tooltip : str, optional
+        Tooltip.
+
+    Returns
+    -------
+    QToolButton
+        The button.
+    """
     button=QToolButton();button.setStyleSheet(SMALL_BUTTON_STYLE)
     button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
     if arrow is not None:button.setArrowType(arrow)
@@ -47,8 +90,14 @@ class TabArrows(QWidget):
 
     Hidden or disabled tabs are skipped, and the arrows never leave this tab widget.
     Call refresh() after showing or hiding tabs (Qt has no signal for tab visibility).
+
+    Parameters
+    ----------
+    tabs : QTabWidget
+        Tab widget to navigate.
     """
     def __init__(self,tabs):
+        """Create the two arrows in the tab widget's corner (see the class description)."""
         super().__init__()
         self.tabs=tabs
         layout=QHBoxLayout(self);layout.setContentsMargins(0,0,4,0);layout.setSpacing(4)
@@ -61,6 +110,18 @@ class TabArrows(QWidget):
         self.refresh()
 
     def neighbour(self,delta):
+        """Index of the nearest visible, enabled tab in one direction.
+
+        Parameters
+        ----------
+        delta : int
+            -1 for the previous tab, 1 for the next.
+
+        Returns
+        -------
+        int or None
+            Tab index, or None at the first / last tab.
+        """
         index=self.tabs.currentIndex()+delta
         while 0<=index<self.tabs.count():
             if self.tabs.isTabVisible(index) and self.tabs.isTabEnabled(index):return index
@@ -68,10 +129,24 @@ class TabArrows(QWidget):
         return None
 
     def step(self,delta):
+        """Go to the previous (delta=-1) or next (delta=1) available tab.
+
+        Parameters
+        ----------
+        delta : int
+            Direction.
+        """
         index=self.neighbour(delta)
         if index is not None:self.tabs.setCurrentIndex(index)
 
     def refresh(self,*_):
+        """Enable or disable the arrows and update their tooltips with the neighbouring tab names.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         for button,delta,word,edge in ((self.previous,-1,'Previous','first'),(self.next,1,'Next','last')):
             index=self.neighbour(delta)
             button.setEnabled(index is not None)
@@ -82,10 +157,34 @@ def panel_toggle(panel,open_text,closed_text='Settings',name='settings',on_chang
     """Small collapse button for a side panel: '◀ open_text' while shown, '▶ closed_text' while hidden.
 
     Place it directly above the panel; it stays visible while the panel is collapsed.
-    on_change(visible) runs after each toggle (e.g. to resize a splitter).
+
+    Parameters
+    ----------
+    panel : QWidget
+        Panel to show and hide.
+    open_text : str
+        Button text while the panel is shown.
+    closed_text : str, optional
+        Button text while the panel is hidden.
+    name : str, optional
+        Panel name used in the tooltips.
+    on_change : callable, optional
+        Called with the new visibility after each toggle (e.g. to resize a splitter).
+
+    Returns
+    -------
+    QToolButton
+        The checkable toggle button.
     """
     button=small_tool_button();button.setCheckable(True);button.setChecked(True)
     def update(visible):
+        """Show or hide the panel and update the button.
+
+        Parameters
+        ----------
+        visible : bool
+            New visibility.
+        """
         panel.setVisible(visible)
         button.setArrowType(Qt.ArrowType.LeftArrow if visible else Qt.ArrowType.RightArrow)
         button.setText(open_text if visible else closed_text)
@@ -96,6 +195,13 @@ def panel_toggle(panel,open_text,closed_text='Settings',name='settings',on_chang
 
 
 def light_figure(figure):
+    """Give a matplotlib figure the app's light theme (white background, dark text, soft grid).
+
+    Parameters
+    ----------
+    figure : matplotlib.figure.Figure
+        Figure to restyle, including its axes and legends.
+    """
     figure.set_facecolor('white')
     for ax in figure.axes:
         ax.set_facecolor('white')
@@ -116,7 +222,13 @@ def light_figure(figure):
 
 
 def compact_toolbar(toolbar):
-    """Native, labelled navigation with clear active states and full click targets."""
+    """Restyle a matplotlib navigation toolbar: labelled buttons, clear active states, no subplot/edit tools.
+
+    Parameters
+    ----------
+    toolbar : NavigationToolbar2QT
+        Toolbar to restyle.
+    """
     toolbar.setMinimumHeight(40)
     toolbar.setMaximumHeight(48)
     toolbar.setIconSize(QSize(18,18))

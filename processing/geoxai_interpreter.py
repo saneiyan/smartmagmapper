@@ -1,3 +1,8 @@
+"""GeoXAI: plain-language explanation of why the anomaly analysis chose its candidate location.
+
+Each cluster gets an interpretability score from its support, peak strength, compactness, shape and separation
+from the threshold; the selected candidate's factors are explained in a short narrative.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,12 +14,37 @@ import pandas as pd
 
 @dataclass
 class GeoXAIReport:
+    """Explanation of a candidate location.
+
+    Attributes
+    ----------
+    narrative : str
+        Plain-language explanation shown in the Explainable AI (XAI) view.
+    cluster_scores : pandas.DataFrame
+        Every cluster with its factor scores, GeoXAI confidence and rank.
+    contributions : pandas.DataFrame
+        The selected candidate's factors with their score, weight and weighted score.
+    """
     narrative: str
     cluster_scores: pd.DataFrame
     contributions: pd.DataFrame
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Convert a value to a finite float.
+
+    Parameters
+    ----------
+    value : object
+        Value to convert.
+    default : float, optional
+        Returned when the value is missing, not a number or not finite.
+
+    Returns
+    -------
+    float
+        The value or the default.
+    """
     try:
         out = float(value)
     except (TypeError, ValueError):
@@ -25,6 +55,18 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def _normalize_positive(series: pd.Series) -> pd.Series:
+    """Scale values to 0-1 by their maximum (all zeros when there is no positive maximum).
+
+    Parameters
+    ----------
+    series : pandas.Series
+        Values.
+
+    Returns
+    -------
+    pandas.Series
+        Normalised values, clipped to 0-1.
+    """
     values = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan)
     vmax = values.max(skipna=True)
     if not np.isfinite(vmax) or vmax <= 0:
@@ -33,6 +75,18 @@ def _normalize_positive(series: pd.Series) -> pd.Series:
 
 
 def _compactness_score(radius: pd.Series) -> pd.Series:
+    """Compactness score: 1 / (1 + radius / median radius), so smaller clusters score higher.
+
+    Parameters
+    ----------
+    radius : pandas.Series
+        Cluster uncertainty radii in metres.
+
+    Returns
+    -------
+    pandas.Series
+        Scores between 0 and 1.
+    """
     values = pd.to_numeric(radius, errors="coerce").replace([np.inf, -np.inf], np.nan)
     valid = values.dropna()
     if valid.empty:
@@ -42,12 +96,40 @@ def _compactness_score(radius: pd.Series) -> pd.Series:
 
 
 def _shape_score(elongation: pd.Series) -> pd.Series:
+    """Shape score: 1 / elongation, so round clusters score higher than elongated ones.
+
+    Parameters
+    ----------
+    elongation : pandas.Series
+        Cluster elongation ratios (1 = round).
+
+    Returns
+    -------
+    pandas.Series
+        Scores between 0 and 1.
+    """
     values = pd.to_numeric(elongation, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(1.0)
     values = values.clip(lower=1.0)
     return (1.0 / values).clip(0.0, 1.0)
 
 
 def score_clusters(score_points: pd.DataFrame, clusters: pd.DataFrame) -> pd.DataFrame:
+    """Give every cluster a GeoXAI confidence from five weighted factors.
+
+    Weights: support 0.30, peak strength 0.25, compactness 0.25, shape 0.10, threshold separation 0.10.
+
+    Parameters
+    ----------
+    score_points : pandas.DataFrame
+        Score windows with 'cluster_label' and 'threshold_margin'.
+    clusters : pandas.DataFrame
+        Clusters from data_analysis_pipeline.cluster_hits.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Clusters with the factor scores, 'geo_xai_confidence' (0-1) and 'geo_xai_rank', best first.
+    """
     if clusters is None or clusters.empty:
         return pd.DataFrame()
 
@@ -80,6 +162,18 @@ def score_clusters(score_points: pd.DataFrame, clusters: pd.DataFrame) -> pd.Dat
 
 
 def selected_contributions(cluster_scores: pd.DataFrame) -> pd.DataFrame:
+    """Factor scores of the selected candidate (or the best-scoring cluster).
+
+    Parameters
+    ----------
+    cluster_scores : pandas.DataFrame
+        Output of score_clusters.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns 'factor', 'score', 'weight' and 'weighted_score'.
+    """
     if cluster_scores is None or cluster_scores.empty:
         return pd.DataFrame(columns=["factor", "score", "weight", "weighted_score"])
     selected = cluster_scores[cluster_scores["selected_by_support_compactness"].astype(bool)]
@@ -103,6 +197,24 @@ def explain_candidate(
     summary: dict[str, Any],
    reference_known: bool,
 ) -> GeoXAIReport:
+    """Explain the selected candidate in plain language.
+
+    Parameters
+    ----------
+    clean_df : pandas.DataFrame
+        Analysed survey.
+    score_points, clusters : pandas.DataFrame
+        Results of the anomaly analysis.
+    summary : dict
+        Analysis summary (see data_analysis_pipeline.summarize_analysis).
+    reference_known : bool
+        Whether a reference location was entered (it is then reported as context only).
+
+    Returns
+    -------
+    GeoXAIReport
+        Narrative, cluster scores and the candidate's factor contributions.
+    """
     cluster_scores = score_clusters(score_points, clusters)
     contributions = selected_contributions(cluster_scores)
 

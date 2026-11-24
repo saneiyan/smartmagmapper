@@ -13,16 +13,50 @@ FORMAT='SmartMagMapper project'
 VERSION=1
 
 def _json(value):
+    """json.dumps fallback for NumPy values.
+
+    Parameters
+    ----------
+    value : object
+        Value json cannot serialise by itself.
+
+    Returns
+    -------
+    object
+        Python scalar for NumPy scalars, list for arrays.
+
+    Raises
+    ------
+    TypeError
+        For any other type.
+    """
     if isinstance(value,np.generic):return value.item()
     if isinstance(value,np.ndarray):return value.tolist()
     raise TypeError(type(value).__name__)
 
-def _csv(z,name,frame):z.writestr(name,frame.to_csv(index=False,float_format='%.17g'))
+def _csv(z,name,frame):
+    """Write a data frame into the project archive as CSV with round-trip float precision.
+
+    Parameters
+    ----------
+    z : zipfile.ZipFile
+        Open project archive.
+    name : str
+        Member name inside the archive.
+    frame : pandas.DataFrame
+        Data to write.
+    """
+    z.writestr(name,frame.to_csv(index=False,float_format='%.17g'))
 def _exact_read_options():
     """read_csv options that read '%.17g' floats back bit-for-bit (project checks need exact values).
 
     pandas < 3.1 needs float_precision='round_trip'; from pandas 3.1 the default parser is exact and that
-    option is deprecated. Test the installed pandas once instead of relying on its version number.
+    option is deprecated. The installed pandas is tested once instead of relying on its version number.
+
+    Returns
+    -------
+    dict
+        Keyword arguments for pandas.read_csv.
     """
     rng=np.random.default_rng(0)
     sample=np.concatenate([rng.normal(50,5,1000),rng.uniform(-1e7,1e7,500),rng.standard_normal(500)*1e-9])
@@ -31,9 +65,51 @@ def _exact_read_options():
     return {'float_precision':'round_trip'}
 
 _READ_OPTIONS=_exact_read_options()
-def _read(z,name):return pd.read_csv(io.BytesIO(z.read(name)),**_READ_OPTIONS)
+def _read(z,name):
+    """Read a CSV member of the project archive with exact float parsing.
+
+    Parameters
+    ----------
+    z : zipfile.ZipFile
+        Open project archive.
+    name : str
+        Member name inside the archive.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The table.
+    """
+    return pd.read_csv(io.BytesIO(z.read(name)),**_READ_OPTIONS)
 
 def write_project(path,sessions,active,settings,metadata,comparisons=None,backup=True):
+    """Save surveys, settings and stored filter comparisons as a .smmproj project (a zip of JSON, CSV and arrays).
+
+    The file is written to a temporary file and moved into place, so an interrupted save never damages the
+    previous project. With `backup`, the previous file is kept as .bak1 (older ones as .bak2 and .bak3).
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Project file to write.
+    sessions : list of survey_session.SurveySession
+        Surveys in the project.
+    active : int or None
+        Index of the active survey.
+    settings : dict
+        Window settings to restore (analysis settings, view choices, colour scales...).
+    metadata : dict
+        Project id, title, author and notes.
+    comparisons : dict, optional
+        Stored filter results for comparison: name -> {'result': FilterResult, 'frame': DataFrame}.
+    backup : bool, optional
+        Keep up to three previous versions of an existing file.
+
+    Returns
+    -------
+    dict
+        The manifest written as project.json.
+    """
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
     manifest={'format':FORMAT,'version':VERSION,'saved_utc':datetime.now(timezone.utc).isoformat(),'active':active,'settings':settings,'metadata':metadata,'surveys':[],'comparisons':[]}
     handle=tempfile.NamedTemporaryFile(prefix='smm-',suffix='.tmp',dir=path.parent,delete=False);temporary=Path(handle.name);handle.close()
@@ -65,6 +141,31 @@ def write_project(path,sessions,active,settings,metadata,comparisons=None,backup
     return manifest
 
 def read_project(path):
+    """Open a .smmproj project and check it against its raw data.
+
+    Each survey is re-cleaned from its raw streams with its saved cleaning settings and must match the archived
+    cleaned data; the current field may only differ from it in BT. Projects saved by earlier versions (no unit or
+    coordinate format, duplicate columns) are brought up to date.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Project file (.smmproj or a .bak backup).
+
+    Returns
+    -------
+    manifest : dict
+        Contents of project.json (settings, metadata, active survey...).
+    sessions : list of survey_session.SurveySession
+        The surveys.
+    comparisons : dict
+        Stored filter results for comparison: name -> {'result': FilterResult, 'frame': DataFrame}.
+
+    Raises
+    ------
+    ValueError
+        If the archive is too large, of an unsupported format or version, or fails a consistency check.
+    """
     with zipfile.ZipFile(path) as z:
         members=z.infolist()
         if len(members)>2000 or sum(i.file_size for i in members)>1024**3:raise ValueError('Project archive exceeds the supported size.')

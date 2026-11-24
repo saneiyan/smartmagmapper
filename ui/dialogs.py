@@ -1,3 +1,4 @@
+"""Import Data and Export Data dialogs."""
 from PyQt6.QtWidgets import (QPushButton, QDialog,QDialogButtonBox,
                              QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                              QFileDialog, QCheckBox, QRadioButton, QComboBox,
@@ -14,7 +15,18 @@ from ui.confirm import confirm
 from processing import labels, coordinates as co
 
 class CustomDialog(QDialog):
+   """Import Data dialog: choose a survey file, its magnetic, coordinate and time columns, the magnetic unit
+   and the coordinate format.
+
+   Column choices, the unit and the coordinate format are suggested from the file's headers and values.
+
+   Parameters
+   ----------
+   parent : QWidget, optional
+       Main window (the dialog opens above it).
+   """
    def __init__(self, parent=None):
+        """Build the file, magnetic field, coordinate and time sections and the preview table."""
         super().__init__(parent)
 
         #sets the title for the pop up dialog window
@@ -24,7 +36,6 @@ class CustomDialog(QDialog):
         self.layout = QVBoxLayout()
         self.sub_layout = QHBoxLayout()
         self.button_layout = QHBoxLayout()
-        self.layer_layout = QHBoxLayout()
         self.mag_layout = QHBoxLayout()
         self.coordinates_layout = QHBoxLayout()
         self.time_layout = QHBoxLayout()
@@ -33,12 +44,10 @@ class CustomDialog(QDialog):
         bold = QFont()
         bold.setBold(True)
 
-        #Buttons to apply file settings or cancel
+        #Buttons to apply file settings or cancel; the main window connects OK to its import handler,
+        #which closes the dialog only when the import succeeds
         self.FinishBtn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                 QDialogButtonBox.StandardButton.Cancel)
-        self.FinishBtn.accepted.connect(self.accept)
-        #self.FinishBtn.accepted.connect(self.assign_variables)
-            #self.ok_button_clicked()
         self.FinishBtn.rejected.connect(self.reject)
 
         #Text box for File Name
@@ -46,24 +55,9 @@ class CustomDialog(QDialog):
         self.FileName.setReadOnly(True)
         self.FileNameLabel = QLabel('File Name')
 
-        #Optional Layer Name (if not, main window does autoname)
-        self.LayerName = QLineEdit()
-        self.LayerNameLabel = QLabel('Layer Name')
         #Opens system file dialog selector
         self.FileDialog = QPushButton('Select File')
-
-        #FileTypeGroupBox = QGroupBox('File Type')
-        #creating independent button group for file type
-        self.FileTypeLabel = QLabel('File Type')
-        #making the header bold
-        self.FileTypeLabel.setFont(bold)
-        self.FileButtonGroup = QButtonGroup()
-        #User selects data file type
-        self.FileType_Excel = QRadioButton('Excel')
-        self.FileType_CSV = QRadioButton('CSV')
-        #adding the two buttons to the file type button group
-        self.FileButtonGroup.addButton(self.FileType_Excel)
-        self.FileButtonGroup.addButton(self.FileType_CSV)
+        self.FileDialog.clicked.connect(self.select_file)
 
         #creating independent button group for magnetic field data type
         self.MagDataTypeLabel = QLabel('Magnetic Field Data')
@@ -101,13 +95,9 @@ class CustomDialog(QDialog):
         self.YMagField = QComboBox()
         self.YMagField.setPlaceholderText('Select Y column')
 
-        #User selects the y direction of magnetic field
+        #User selects the z direction of magnetic field
         self.ZMagField = QComboBox()
         self.ZMagField.setPlaceholderText('Select Z column')
-
-        #For detecting file headers vs first line of data. Needed?
-        self.FileHasHeaders = QCheckBox()
-        self.FileHeadersLabel = QLabel('File Has Headers')
 
         #User selects TMI of magnetic field
         self.TotalMagField = QComboBox()
@@ -141,12 +131,12 @@ class CustomDialog(QDialog):
         #making header bold
         self.TimeHeader.setFont(bold)
         self.TimeButtonGroup = QButtonGroup()
-        #User checks if the mag data is vector or scalar
+        #User checks if the magnetometer and GPS share one time column or have their own
         self.ComboTime = QRadioButton('Independent sensor timestamps')
         self.ComboTime.toggled.connect(self.toggle_combo_time)
         self.SingleTime = QRadioButton('Shared sensor timestamps')
         self.SingleTime.toggled.connect(self.toggle_single_time)
-        #adding the two buttons to the magnetic field data type button group
+        #adding the two buttons to the time button group
         self.TimeButtonGroup.addButton(self.ComboTime)
         self.TimeButtonGroup.addButton(self.SingleTime)
 
@@ -164,7 +154,7 @@ class CustomDialog(QDialog):
         self.sub_layout.addWidget(self.FileDialog)
         self.layout.addLayout(self.sub_layout)
 
-        #adding widgets to the fourth section of the dialog box
+        #magnetic field data type and unit
         self.layout.addWidget(self.MagDataTypeLabel)
         self.mag_layout.addWidget(self.VectorMag)
         self.mag_layout.addWidget(self.ScalarMag)
@@ -174,7 +164,7 @@ class CustomDialog(QDialog):
         self.VectorMag.setChecked(True)
         self.layout.addLayout(self.mag_layout)
 
-        #adding widgets to the fifth section of the dialog box
+        #magnetic and time column selectors
         self.button_layout.addWidget(self.XMagField)
         self.button_layout.addWidget(self.YMagField)
         self.button_layout.addWidget(self.ZMagField)
@@ -212,17 +202,15 @@ class CustomDialog(QDialog):
 
    def reject(self):
        # Cancel, Esc and the window's close button all come through here.
+       """Cancel, Esc or the close button: close only after the user confirms."""
        name = os.path.basename(self.FileName.text()) or 'this survey'
        if confirm(self, 'Cancel Import', f'Are you sure you would like to cancel importing {name}?',
                   'The file and column selections in this window will be lost.',
                   yes_text='Cancel Import', no_text='Keep Editing'):
            super().reject()
 
-   def select_file_button_clicked(self):
-       #calls the select file function
-       self.select_file()
-
    def select_file(self):
+       """Choose a survey file and read its columns."""
        path, _ = QFileDialog.getOpenFileName(self, 'Import survey', '',
            'Survey files (*.csv *.txt *.xls *.xlsx *.xlsm)')
        if not path:
@@ -238,6 +226,7 @@ class CustomDialog(QDialog):
 
    def read_file(self):
         # read raw file and import the column headers into the drop-down menus
+        """Read the selected file and fill the column dropdowns (Excel sheets are placed side by side)."""
         if not getattr(self, 'file_paths', None):
             return
 
@@ -250,7 +239,6 @@ class CustomDialog(QDialog):
                 df = pd.read_csv(path, sep=None, engine='python', encoding='utf-8')
             except Exception:
                 df = pd.read_csv(path)
-            self.FileType_CSV.setChecked(True)
 
         # read Excel files (concatenate all sheets)
         elif ext in ('.xls', '.xlsx', '.xlsm'):
@@ -258,18 +246,15 @@ class CustomDialog(QDialog):
             # flatten MultiIndex columns if present
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]
-            self.FileType_Excel.setChecked(True)
 
         # fallback: try CSV then Excel
         else:
             try:
                 df = pd.read_csv(path)
-                self.FileType_CSV.setChecked(True)
             except Exception:
                 df = pd.concat(pd.read_excel(path, sheet_name=None), axis=1)
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]
-                self.FileType_Excel.setChecked(True)
 
         self.raw_file = df
         columns = list(self.raw_file.columns)
@@ -295,6 +280,13 @@ class CustomDialog(QDialog):
 
 
    def coordinate_format_changed(self, *_):
+       """Show the EPSG box for projected coordinates and suggest matching coordinate columns.
+
+       Parameters
+       ----------
+       *_ : object
+           Ignored signal arguments.
+       """
        projected = self.CoordFormat.currentData() == 'projected'
        self.EPSG.setVisible(projected)
        self.XLatitude.setPlaceholderText('Select Easting (m)' if projected else 'Select Latitude')
@@ -307,14 +299,20 @@ class CustomDialog(QDialog):
                combo.setCurrentIndex(combo.findText(str(found)) if found is not None else -1)
 
    def suggest_unit(self, *_):
-       """Use the unit written in the chosen magnetic columns' headers, e.g. 'X (nT)', if there is one."""
+       """Use the unit written in the chosen magnetic columns' headers, e.g. 'X (nT)', if there is one.
+
+       Parameters
+       ----------
+       *_ : object
+           Ignored signal arguments.
+       """
        combos = (self.XMagField, self.YMagField, self.ZMagField) if self.VectorMag.isChecked() else (self.TotalMagField,)
        unit = labels.detect_unit(*[combo.currentText() for combo in combos if combo.currentIndex() >= 0])
        if unit is not None:
            self.MagUnit.setCurrentIndex(self.MagUnit.findData(unit))
 
    def suggest_coordinate_format(self):
-       """Guess degrees+minutes or DMS when the latitude column holds text such as 45°07'24.4"N."""
+       """Guess degrees + minutes or DMS when the latitude column holds text such as 45°07'24.4"N."""
        if self.XLatitude.currentIndex() < 0:
            return
        column = self.raw_file[self.XLatitude.currentText()].dropna()
@@ -326,7 +324,19 @@ class CustomDialog(QDialog):
            self.CoordFormat.setCurrentIndex(self.CoordFormat.findData(guess))
 
    def suggest_columns(self):
+       """Pre-select columns whose headers look like magnetic components, total field, coordinates and times,
+       then suggest the data type, time layout, unit and coordinate format.
+       """
        def choose(combo, aliases):
+           """Select the first column matching one of the aliases.
+
+           Parameters
+           ----------
+           combo : QComboBox
+               Column dropdown.
+           aliases : list of str
+               Accepted header names.
+           """
            found = dap._find_column(self.raw_file, aliases, required=False)
            if found is not None:
                combo.setCurrentText(str(found))
@@ -360,9 +370,43 @@ class CustomDialog(QDialog):
            combo.currentIndexChanged.connect(self.suggest_unit)
 
    def build_streams(self):
+       """Build the magnetometer and GPS streams from the dialog choices.
+
+       Coordinates are converted to decimal degrees; the original columns are kept in the GPS stream. The unit and
+       coordinate format are stored in `import_settings`.
+
+       Returns
+       -------
+       mag : pandas.DataFrame
+           'Mag_Time (s)' with X, Y, Z (vector) or BT (scalar), unit-free.
+       gps : pandas.DataFrame
+           'Loc_Time (s)', 'Latitude (°)', 'Longitude (°)' and the original coordinate columns.
+
+       Raises
+       ------
+       ValueError
+           If no file is selected, a column is missing or chosen twice, or the coordinates cannot be converted.
+       """
        if not getattr(self, 'file_paths', None) or getattr(self, 'raw_file', None) is None:
            raise ValueError('Select a survey file first.')
        def selected(combo):
+           """Column chosen in a dropdown.
+
+           Parameters
+           ----------
+           combo : QComboBox
+               Column dropdown.
+
+           Returns
+           -------
+           str
+               Column name.
+
+           Raises
+           ------
+           ValueError
+               If nothing valid is selected.
+           """
            text = combo.currentText()
            if combo.currentIndex() < 0 or text not in self.raw_file.columns:
                raise ValueError('Assign all required magnetic, coordinate, and time fields.')
@@ -396,54 +440,77 @@ class CustomDialog(QDialog):
                                'coordinates': {'format': fmt, 'epsg': int(epsg) if epsg else None, 'columns': [lat, lon]}}
        return mag, gps
 
-   def assign_variables(self):
-       # Compatibility: validate without trimming the table or replacing widget attributes.
-       return self.build_streams()
-
-#       need to reset when new file selected
-
    def sample_data(self):
+       """Show the file in the preview table."""
        self.model = TableModel.TableModel(self.raw_file)
        self.SampleData.setModel(self.model)
-       #self.SampleData.resizeColumnsToContents()
        header = self.SampleData.horizontalHeader()
        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
 
    def toggle_vector(self):
+       """Vector data: enable the X, Y, Z column choices."""
        self.TotalMagField.setEnabled(False)
        self.XMagField.setEnabled(True)
        self.YMagField.setEnabled(True)
        self.ZMagField.setEnabled(True)
 
    def toggle_scalar(self):
+       """Scalar data: enable the total field column choice."""
        self.TotalMagField.setEnabled(True)
        self.XMagField.setEnabled(False)
        self.YMagField.setEnabled(False)
        self.ZMagField.setEnabled(False)
 
    def toggle_combo_time(self):
+       """Independent timestamps: enable the magnetometer and GPS time columns."""
        self.TotalTime.setEnabled(False)
        self.MagTime.setEnabled(True)
        self.LocTime.setEnabled(True)
 
    def toggle_single_time(self):
+       """Shared timestamps: enable the single time column."""
        self.TotalTime.setEnabled(True)
        self.MagTime.setEnabled(False)
        self.LocTime.setEnabled(False)
-
-   def missing_variable_warning(self):
-       self.variablemissing = QMessageBox.warning(self, 'Missing Variable', 'Some variables have not been assigned. Please assign values to the missing variables before proceeding.')
 
 class DataExportDialog(QDialog):
     """Choose what File > Export Data writes: data tables, map and signal-plot figures, and a GeoTIFF raster.
 
     The dialog only collects choices and builds the output file names; the main window writes the files.
+
+    Parameters
+    ----------
+    parent : QWidget
+        Main window.
+    base_path : pathlib.Path
+        Suggested folder and base name; every file starts with it.
+    signal_plots : list of tuple
+        (tab index, title) of the open signal plots.
+    current_signal_plot : int
+        Signal plot ticked by default.
+    map_stage : int
+        Cleaning stage ticked by default (0 before, 1 after cleaning).
+    map_style : str
+        Map type shown on screen.
+    has_filter : bool
+        Whether a filter result is stored (enables the current-field exports, the default GeoTIFF dataset).
+    fields : list of tuple
+        (label, column) of the magnetic field columns.
+    current_field : str
+        Column shown on the cleaning map.
+    raster_available : bool
+        Whether rasterio is installed.
+    kriging_available : bool
+        Whether pykrige is installed.
+    default_cell_size : float
+        Suggested GeoTIFF cell size in metres.
     """
     STAGES = [('synchronized', 'Synchronized Data (Before Cleaning)'), ('cleaned', 'Cleaned Data (After Cleaning)')]
     INTERPOLATION = [('linear', 'Linear'), ('cubic', 'Cubic'), ('nearest', 'Nearest neighbour'), ('idw', 'Inverse distance (IDW)')]
 
     def __init__(self, parent, base_path, *, signal_plots, current_signal_plot, map_stage, map_style,
                  has_filter, fields, current_field, raster_available, kriging_available, default_cell_size):
+        """Build the destination, data table, figure and GeoTIFF sections (see the class description)."""
         super().__init__(parent)
         self.setWindowTitle('Export Data')
         layout = QVBoxLayout(self)
@@ -513,11 +580,13 @@ class DataExportDialog(QDialog):
             self.raster_dataset.addItem(label, key)
         if has_filter:
             self.raster_dataset.addItem('Current field (with applied filters)', 'current')
-        self.raster_dataset.setCurrentIndex(1)
+        # with a stored filter result, the processed field is the natural map to export
+        self.raster_dataset.setCurrentIndex(self.raster_dataset.findData('current') if has_filter else 1)
         self.raster_field = QComboBox()
-        for label, column in fields:
-            self.raster_field.addItem(label, column)
-        self.raster_field.setCurrentIndex(max(0, self.raster_field.findData(current_field)))
+        self.raster_fields = fields
+        self.raster_current_field = current_field
+        self.raster_dataset.currentIndexChanged.connect(self.update_raster_fields)
+        self.update_raster_fields()
         self.raster_method = QComboBox()
         for key, label in self.INTERPOLATION + ([('kriging', 'Ordinary kriging')] if kriging_available else []):
             self.raster_method.addItem(label, key)
@@ -565,17 +634,59 @@ class DataExportDialog(QDialog):
         self.raster.toggled.connect(self.update_summary)
         self.update_summary()
 
+    def update_raster_fields(self, *_):
+        """Fill the raster Field list for the chosen dataset.
+
+        Filters write their result to the total field (BT) only; the X, Y and Z columns of the current field are the
+        unfiltered cleaned components, so they are not offered for it.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
+        keep = self.raster_field.currentData() or self.raster_current_field
+        current = self.raster_dataset.currentData() == 'current'
+        self.raster_field.blockSignals(True)
+        self.raster_field.clear()
+        for label, column in self.raster_fields:
+            if not current or column == 'BT':
+                self.raster_field.addItem(label, column)
+        self.raster_field.setCurrentIndex(max(0, self.raster_field.findData(keep)))
+        self.raster_field.blockSignals(False)
+        self.raster_field.setToolTip('The filter result is stored in the total field (BT).' if current else '')
+
     @staticmethod
     def slug(text):
+        """File-name-safe version of a label.
+
+        Parameters
+        ----------
+        text : str
+            Label, e.g. 'BT (µT)'.
+
+        Returns
+        -------
+        str
+            For example 'BT_uT' ('field' if nothing is left).
+        """
         return re.sub(r'[^A-Za-z0-9]+', '_', str(text).replace('\u00b5', 'u').replace('\u03bc', 'u')).strip('_') or 'field'
 
     def choose_base(self):
+        """Browse for the export folder and base name."""
         path, _ = QFileDialog.getSaveFileName(self, 'Export Data: folder and base name', self.base.text(), 'All files (*)')
         if path:
             self.base.setText(str(Path(path).with_suffix('')))
 
     def options(self):
-        """Selected exports with their output paths."""
+        """Selected exports with their output paths.
+
+        Returns
+        -------
+        dict
+            'csv': list of (dataset key, path); 'maps': list of (stage index, path); 'map_style'; 'signals': list of
+            (tab index, path); 'figure_format' ('png' or 'pdf'); 'raster': GeoTIFF settings and path, or None.
+        """
         base = Path(self.base.text().strip())
         ext = self.figure_format.currentData()
         named = lambda suffix: base.with_name(f'{base.name}_{suffix}')
@@ -594,6 +705,13 @@ class DataExportDialog(QDialog):
                 'figure_format': ext, 'raster': raster}
 
     def update_summary(self, *_):
+        """List the files that will be written and enable Export when there is at least one.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         options = self.options()
         paths = ([p for _, p in options['csv']] + [p for _, p in options['maps']] + [p for _, p in options['signals']]
                  + ([options['raster']['path']] if options['raster'] else []))

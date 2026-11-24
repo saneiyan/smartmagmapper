@@ -1,5 +1,6 @@
 """Explicit signal/domain filters with recoverable inputs and metric spatial grids."""
 from dataclasses import dataclass, field
+import datetime as dt
 import numpy as np
 import pandas as pd
 from scipy import signal as sp
@@ -10,21 +11,59 @@ import xarray as xr
 from processing.labels import signal_label
 from processing import data_analysis_pipeline as dap
 
+try:
+    import ppigrf
+except ImportError:
+    ppigrf = None
+
 SAVITZKY_POLYORDER = 2
+# Dates covered by the IGRF coefficients in ppigrf (it returns NaN before and a frozen field after).
+IGRF_FIRST_DATE = dt.date(1900, 1, 1)
+IGRF_LAST_DATE = dt.date(2029, 12, 31)
 
 SERIES_FILTERS = ['VMD', 'Savitzky–Golay', 'Moving average', 'Low-pass', 'High-pass', 'Band-pass', 'Linear detrend']
 SPATIAL_FILTERS = ['Upward continuation', 'Regularized downward continuation', 'Reduction to pole']
 
 
 class FilterSettingError(ValueError):
-    """A filter setting is outside the range this survey supports; `setting` names the parameter."""
+    """A filter setting is outside the range this survey supports.
+
+    Parameters
+    ----------
+    message : str
+        Explanation shown to the user, including the valid range.
+    setting : str, optional
+        Name of the offending parameter (e.g. 'window'), so the Filter Lab can put the cursor in it.
+    """
     def __init__(self, message, setting=None):
+        """Store the message and the name of the offending setting."""
         super().__init__(message)
         self.setting = setting
 
 
 @dataclass
 class FilterResult:
+    """Result of one Filter Lab filter: input and output values at the survey samples, with its settings.
+
+    Attributes
+    ----------
+    before, after : numpy.ndarray
+        Input and filtered values at the survey samples.
+    axis : numpy.ndarray
+        Time or path distance of each sample.
+    axis_label : str
+        Label of `axis`, e.g. 'Time (s)'.
+    settings : dict
+        Filter, signal, processing coordinate and parameters (saved with stored results and projects).
+    notes : list of str
+        Processing notes shown in the Processing Record.
+    modes, metrics, selected : optional
+        VMD modes, their metrics and the retained mode numbers (VMD only).
+    mode_axis, mode_signal : numpy.ndarray, optional
+        Uniform grid and input signal the modes were computed on (VMD only).
+    grids : tuple, optional
+        (grid x, grid y, input grid, filtered grid) for spatial filters.
+    """
     before: np.ndarray
     after: np.ndarray
     axis: np.ndarray
@@ -39,6 +78,18 @@ class FilterResult:
     grids: tuple | None = None
 
     def select_modes(self, selected):
+        """Rebuild the VMD result from a chosen set of modes.
+
+        Parameters
+        ----------
+        selected : iterable of int
+            1-based mode numbers to keep.
+
+        Raises
+        ------
+        ValueError
+            If there is no decomposition, or no valid mode is selected.
+        """
         if self.modes is None:
             raise ValueError('There is no decomposition to reconstruct.')
         selected = sorted(set(int(x) for x in selected))
@@ -50,7 +101,69 @@ class FilterResult:
         self.settings['selected_modes'] = selected
 
 
+def igrf_field_direction(latitude, longitude, date, height_m=0.0):
+    """Direction and strength of the Earth's main magnetic field from the IGRF model.
+
+    Used to fill in the inclination and declination for reduction to pole, so they do not have to be looked up.
+    The IGRF describes the core field only; local crustal fields and daily variations are not included.
+
+    Parameters
+    ----------
+    latitude, longitude : float
+        Survey position in decimal degrees (WGS 84).
+    date : datetime.date
+        Survey date, between IGRF_FIRST_DATE and IGRF_LAST_DATE.
+    height_m : float, optional
+        Height above sea level in metres.
+
+    Returns
+    -------
+    dict
+        'inclination' (degrees, positive downward), 'declination' (degrees east of true north),
+        'intensity_nT' (total field in nT), and the 'date', 'latitude', 'longitude' and 'model' used.
+
+    Raises
+    ------
+    ImportError
+        If ppigrf is not installed.
+    ValueError
+        If the date is outside the IGRF range or the position is invalid.
+    """
+    if ppigrf is None:
+        raise ImportError('The IGRF estimate needs the ppigrf package. Install it with "pip install ppigrf".')
+    date = pd.Timestamp(date).date()
+    if not IGRF_FIRST_DATE <= date <= IGRF_LAST_DATE:
+        raise ValueError(f'The IGRF model covers {IGRF_FIRST_DATE:%Y-%m-%d} to {IGRF_LAST_DATE:%Y-%m-%d}; '
+                         f'{date:%Y-%m-%d} is outside that range.')
+    if not (np.isfinite(latitude) and np.isfinite(longitude) and -90 <= latitude <= 90 and -180 <= longitude <= 180):
+        raise ValueError('A valid survey latitude and longitude are needed for the IGRF estimate.')
+    east, north, up = (float(np.ravel(component)[0]) for component in
+                       ppigrf.igrf(float(longitude), float(latitude), float(height_m) / 1000.0, pd.Timestamp(date)))
+    intensity, inclination, declination = hm.magnetic_vec_to_angles(east, north, up)
+    return {'inclination': float(inclination), 'declination': float(declination), 'intensity_nT': float(intensity),
+            'date': date.isoformat(), 'latitude': float(latitude), 'longitude': float(longitude), 'model': 'IGRF (ppigrf)'}
+
+
 def field_values(frame, field):
+    """Values of a Filter Lab signal.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        Cleaned survey, or the current field for 'Current result'.
+    field : str
+        'Total magnitude', 'Current result', 'X', 'Y' or 'Z'.
+
+    Returns
+    -------
+    numpy.ndarray
+        The values (BT for the total field and the current result).
+
+    Raises
+    ------
+    ValueError
+        If the component is not in this survey.
+    """
     if field == 'Total magnitude':
         return frame['BT'].to_numpy(dtype=float)
     if field == 'Current result':
@@ -62,6 +175,36 @@ def field_values(frame, field):
 
 
 def _uniform_series(frame, values, domain):
+    """Resample a signal onto a uniform time or path-distance grid for filtering.
+
+    Repeated positions are averaged.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        Survey with 'Time (s)' and 'Distance (m)'.
+    values : numpy.ndarray
+        Signal at the survey samples.
+    domain : {'Time', 'Path distance'}
+        Processing coordinate.
+
+    Returns
+    -------
+    axis : numpy.ndarray
+        Original coordinate of each sample.
+    uniform : numpy.ndarray
+        Uniform grid.
+    resampled : numpy.ndarray
+        Signal on the uniform grid.
+    notes : list of str
+        Processing notes.
+
+    Raises
+    ------
+    ValueError
+        For non-finite or unordered data, fewer than 16 distinct positions, or a gap of more than five median
+        intervals.
+    """
     key = 'Time (s)' if domain == 'Time' else 'Distance (m)'
     x = frame[key].to_numpy(dtype=float)
     if not np.isfinite(x).all() or not np.isfinite(values).all():
@@ -86,6 +229,36 @@ def _uniform_series(frame, values, domain):
 
 
 def run_filter(frame, field='Total magnitude', domain='Time', method='VMD', **params):
+    """Run a Filter Lab filter on one signal of a survey.
+
+    Series filters work on a uniform time or path-distance grid and are interpolated back to the survey samples;
+    spatial filters work on a metric UTM grid (see _spatial).
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        Cleaned survey, or the current field for 'Current result'.
+    field : str, optional
+        Signal: 'Total magnitude', 'Current result', 'X', 'Y' or 'Z'.
+    domain : {'Time', 'Path distance', 'Spatial grid'}, optional
+        Processing coordinate.
+    method : str, optional
+        One of SERIES_FILTERS or SPATIAL_FILTERS.
+    **params
+        Filter settings: window, low, high, k_modes, alpha, cell_size, height, max_gain, inclination, declination.
+
+    Returns
+    -------
+    FilterResult
+        Input, output, settings and notes.
+
+    Raises
+    ------
+    FilterSettingError
+        If a setting is invalid for this survey (the message gives the valid range).
+    ValueError
+        If the filter cannot run on this data.
+    """
     if method == 'VMD' and domain != 'Time':
         raise ValueError("This application's VMD workflow is time-based; choose Time.")
     before = field_values(frame, field)
@@ -139,6 +312,17 @@ def run_filter(frame, field='Total magnitude', domain='Time', method='VMD', **pa
         nyquist = .5/dx
         unit = 'Hz' if domain == 'Time' else 'cycles/m'
         def check_cutoff(value, label, setting):
+            """Raise FilterSettingError unless a cutoff lies between 0 and the Nyquist limit.
+
+            Parameters
+            ----------
+            value : float
+                Cutoff frequency (Hz or cycles/m).
+            label : str
+                Name of the setting, for the message.
+            setting : str
+                Parameter name ('low' or 'high').
+            """
             if not 0 < value < nyquist:
                 raise FilterSettingError(f'{label} cutoff is {value:g} {unit}, but it must be above 0 and below the Nyquist limit '
                                          f'of {nyquist:.4g} {unit} for this survey\'s sampling. Choose a value between 0 and {nyquist:.4g}.', setting)
@@ -161,6 +345,36 @@ def run_filter(frame, field='Total magnitude', domain='Time', method='VMD', **pa
 
 
 def _spatial(frame, values, method, params, field):
+    """Apply a spatial transform on a metric grid and sample the result back at the survey points.
+
+    The survey is gridded (linear interpolation, nearest-neighbour fill outside the hull), the median background is
+    removed, the grid is reflection-padded, and the transform is applied in the wavenumber domain.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        Survey with Easting (m), Northing (m) and Time (s).
+    values : numpy.ndarray
+        Total-field values at the survey samples.
+    method : str
+        'Upward continuation', 'Regularized downward continuation' or 'Reduction to pole'.
+    params : dict
+        cell_size, height, max_gain, inclination and declination.
+    field : str
+        Signal name, recorded in the settings.
+
+    Returns
+    -------
+    FilterResult
+        Result with the grids in `grids`.
+
+    Raises
+    ------
+    FilterSettingError
+        For an invalid grid spacing, height, gain cap or inclination.
+    ValueError
+        If the survey does not cover a two-dimensional area.
+    """
     if method not in SPATIAL_FILTERS:
         raise ValueError('Choose a spatial-grid transform.')
     e = frame['Easting (m)'].to_numpy(dtype=float)
@@ -223,7 +437,8 @@ def _spatial(frame, values, method, params, field):
     notes = ['Metric UTM grid; linear interpolation, nearest fill outside the convex hull, and reflection padding.',
              'Gridding and boundaries influence the result; map interpretation requires adequate survey coverage.']
     if method == 'Reduction to pole':
-        notes.append('Median background removed. Enter field direction for the survey; magnetization is assumed parallel to the inducing field.')
+        notes.append('Median background removed. Magnetization is assumed parallel to the inducing field.')
+        notes.append('Field direction: ' + str(params.get('direction_source') or 'entered by the user') + '.')
     elif method == 'Regularized downward continuation':
         notes.append('Gain-capped inverse continuation is a stabilized approximation and can still amplify noise.')
     axis = frame['Time (s)'].to_numpy(dtype=float)
