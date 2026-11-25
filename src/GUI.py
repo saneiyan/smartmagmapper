@@ -1,20 +1,18 @@
 """SmartMagMapper: the main window and the application launcher.
 
-Run `python GUI.py`, optionally followed by a survey or project file to open. The main window builds the window
+Run `python GUI.py` from the src folder, optionally followed by a survey or project file to open. The main window builds the window
 and its tabs; tab and action logic comes from the mixin modules in ui/, and data processing lives in processing/.
 """
 import sys, os
-import threading
 import traceback
 from pathlib import Path
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont, QIcon, QPixmap
+from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (QApplication, QMessageBox, QLabel, QMainWindow, QStatusBar, QWidget, QProgressBar,
-                            QVBoxLayout, QHBoxLayout, QLineEdit, QComboBox, QTabWidget, QSplashScreen)
+                            QVBoxLayout, QHBoxLayout, QComboBox, QTabWidget, QSplashScreen)
 from ui.survey_actions import SurveyActionsMixin
 from ui.analysis_tab import AnalysisTabMixin
 from ui.location_tab import LocationTabMixin
-from ui.map_field import MapFieldMixin
 from ui.exports import ExportsMixin
 
 
@@ -27,39 +25,38 @@ else:
         # we are running in a normal Python environment
         bundle_dir = os.path.dirname(os.path.abspath(__file__))
 
-class MainWindow(SurveyActionsMixin, AnalysisTabMixin, LocationTabMixin, MapFieldMixin, ExportsMixin, QMainWindow):
-    """Main window: builds the window and its tabs; the tab and action logic comes from the mixins."""
+class MainWindow(SurveyActionsMixin, AnalysisTabMixin, LocationTabMixin, ExportsMixin, QMainWindow):
+    """Main window: builds the window and its tabs; the tab and action logic comes from the mixins.
+
+    Parameters
+    ----------
+    parent : QWidget, optional
+        Parent widget.
+    """
     def __init__(self, parent=None):
+        """Build the window, then the per-survey state and the menus (ProjectTools).
+
+        Parameters
+        ----------
+        parent : QWidget, optional
+            Parent widget.
+        """
         super(MainWindow, self).__init__(parent)
         self.initUI()
         self.sessions = []
-        #Caches imported datasets into a list
-        self.df_list = list()
-        #Cache for processed dataframes
-        self.processed_dfs = {}
-        #Cache for dialog config per file index
-        self.dialog_configs = {}
-        #Cache for magdf/gpsdf per file index
-        self.mag_gps_dfs = {}
         self.active_dataset_index = None
-        self.current_df = None
-        #min and max magnetic field measurements within the dataset
-        self.vmin = self.vmax = None
-        self.df = None
-        #df_list index of the dataset shown on the map
-        self._analysis_mode_key = None
-        #filters applied to the mapped data, in order, for plot titles
+        #filters applied to the current field, in order, for plot titles
         self.active_filters = []
-        #color scale for the spatial maps
-        self.map_vmin = None
-        self.map_vmax = None
-        #year, month, day used for the IGRF residual
-        self.residual_date = None
-        #source df, settings, residual df so redraws don't recompute each time
-        self.residual_cache = None
         self.project_tools=ProjectTools(self)
 
     def closeEvent(self,event):
+        """Ask before closing: Save / Discard / Cancel with unsaved work, otherwise a plain exit confirmation.
+
+        Parameters
+        ----------
+        event : QCloseEvent
+            Accepted to close the window, ignored to keep it open.
+        """
         tools=getattr(self,'project_tools',None)
         if tools is not None and not tools.loading:
             # With unsaved work, Save / Discard / Cancel doubles as the exit confirmation (no second pop-up).
@@ -72,135 +69,34 @@ class MainWindow(SurveyActionsMixin, AnalysisTabMixin, LocationTabMixin, MapFiel
 
     def initUI(self):
         #sets the window title
+        """Build the active-survey header and the four tabs (Data & Cleaning, Filter Lab, Automated Anomaly
+        Analysis, Location Estimate) with their plain-language tooltips.
+        """
         self.setWindowTitle('SmartMagMapper | Project workspace')
-        #set function to 'bold' labels
-        bold = QFont()
-        bold.setBold(True)
         #set tabs
         self.tabs = QTabWidget()
-        #creates a figure and axes
-        self.figure = Figure()
-        self.axes = self.figure.add_subplot()
-        #creates a canvas to display figure
-        self.canvas = FigureCanvas(self.figure)
         #creating a status bar
         self.setStatusBar(QStatusBar(self))
-        self.analysis_file_path = None
-        self.analysis_selected_dataset = None
         self.analysis_selected_dataset_index = None
         self.analysis_clean_df = None
         self.analysis_annotated_df = None
         self.analysis_modes = None
         self.analysis_mode_metrics = None
         self.analysis_selected_modes = []
-        self.analysis_score_points = None
         self.analysis_clusters = None
         self.analysis_audit = {}
         self.analysis_summary_data = {}
         self.analysis_update_timer = QTimer(self)
         self.analysis_update_timer.setSingleShot(True)
         self.analysis_update_timer.timeout.connect(self.run_anomaly_analysis)
-        self.analysis_reload_timer = QTimer(self)
-        self.analysis_reload_timer.setSingleShot(True)
-        self.analysis_reload_timer.timeout.connect(self.reload_active_survey)
-        #add text boxes for changing the vmin and vmax
-        self.change_label = QLabel('Edit Map Scale')
-        self.change_label.setFont(bold)
-        self.vmax_label = QLabel('Maximum BT (µT):')
-        #self.vmax_label.setFont(bold)
-        self.set_vmax = QLineEdit()
-        self.set_vmax.setPlaceholderText('Max BT (µT) (e.g. "50")')
-        self.set_vmax.setAlignment(Qt.AlignmentFlag.AlignRight)
-
-        self.vmin_label = QLabel('Minimum BT (µT):')
-        #self.vmin_label.setFont(bold)
-        self.set_vmin = QLineEdit()
-        self.set_vmin.setPlaceholderText('Min BT (µT) (e.g. "35")')
-        self.set_vmin.setAlignment(Qt.AlignmentFlag.AlignRight)
-
-        self.date = QLabel('Survey Date')
-        self.date.setFont(bold)
-        self.year_label = QLabel('Year:')
-        self.year = QLineEdit()
-        self.year.setPlaceholderText('Year')
-        self.year.setAlignment(Qt.AlignmentFlag.AlignRight)
-
-        self.month_label = QLabel('Month:')
-        self.month = QLineEdit()
-        self.month.setPlaceholderText('Month')
-        self.month.setAlignment(Qt.AlignmentFlag.AlignRight)
-
-        self.day_label = QLabel('Day:')
-        self.day = QLineEdit()
-        self.day.setPlaceholderText('Day')
-        self.day.setAlignment(Qt.AlignmentFlag.AlignRight)
-
-        self.continuation_label = QLabel('Continuation Height (UC/DC Filters):')
-        self.continuation_label.setFont(bold)
-        self.set_continuation_height = QLineEdit()
-        self.set_continuation_height.setPlaceholderText('Height (meters) (e.g. "5")')
-        self.set_continuation_height.setAlignment(Qt.AlignmentFlag.AlignRight)
 
         self.select_file = QComboBox()
         self.select_file.setPlaceholderText('Import a survey to begin')
         self.select_file.currentIndexChanged.connect(self.select_display_file)
 
-        #one dropdown for how the map is shown
-        self.map_view_label = QLabel('Map View:')
-        self.map_view_type = QComboBox()
-        self.map_view_type.addItems(MAP_VIEWS)
-        self.map_view_type.currentIndexChanged.connect(self.map_view_changed)
-
-        #total field or residual (Earth's background field removed), shown in any map view
-        self.field_label = QLabel('Field:')
-        self.residual_method = QComboBox()
-        self.residual_method.addItems(FIELD_CHOICES)
-        self.residual_method.setItemData(FIELD_CHOICES.index(TOTAL_FIELD), 'Measured total field',
-                                         Qt.ItemDataRole.ToolTipRole)
-        self.residual_method.setItemData(FIELD_CHOICES.index(RESIDUAL_TREND),
-                                         'Subtract a plane fitted to the survey itself (no date needed)',
-                                         Qt.ItemDataRole.ToolTipRole)
-        self.residual_method.setItemData(FIELD_CHOICES.index(RESIDUAL_IGRF),
-                                         'Subtract the IGRF model field for the survey date (uses the Survey Date boxes)',
-                                         Qt.ItemDataRole.ToolTipRole)
-        self.residual_method.currentIndexChanged.connect(self.residual_changed)
-        for date_field in (self.year, self.month, self.day):
-            date_field.editingFinished.connect(self.residual_date_changed)
-
-        self.plot = Figure()
-        self.plot_axes = self.plot.add_subplot()
-        self.chart = FigureCanvas(self.plot)
-
-        #creating the map layout
+        #active-survey header above the tabs
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
-        self.global_controls_widget = QWidget()
-        global_controls_layout = QVBoxLayout()
-        global_controls_layout.setContentsMargins(0, 0, 0, 0)
-        global_controls_layout.setSpacing(4)
-        self.map_layout = QVBoxLayout()
-        button_layout = QHBoxLayout()
-        button_layout_2 = QHBoxLayout()
-        #assigning a widget to the layout
-        button_layout.addWidget(self.change_label)
-        button_layout.addWidget(self.vmin_label)
-        button_layout.addWidget(self.set_vmin)
-        button_layout.addWidget(self.vmax_label)
-        button_layout.addWidget(self.set_vmax)
-        button_layout.addWidget(self.continuation_label)
-        button_layout.addWidget(self.set_continuation_height)
-        global_controls_layout.addLayout(button_layout)
-        button_layout_2.addWidget(self.date)
-        button_layout_2.addWidget(self.year_label)
-        button_layout_2.addWidget(self.year)
-        button_layout_2.addWidget(self.month_label)
-        button_layout_2.addWidget(self.month)
-        button_layout_2.addWidget(self.day_label)
-        button_layout_2.addWidget(self.day)
-        button_layout_2.addWidget(self.map_view_label)
-        button_layout_2.addWidget(self.map_view_type)
-        button_layout_2.addWidget(self.field_label)
-        button_layout_2.addWidget(self.residual_method)
         self.shared_survey_widget = QWidget()
         shared_layout = QHBoxLayout(self.shared_survey_widget)
         shared_layout.setContentsMargins(8, 4, 8, 4)
@@ -211,19 +107,9 @@ class MainWindow(SurveyActionsMixin, AnalysisTabMixin, LocationTabMixin, MapFiel
         self.shared_field_label.setMaximumWidth(620)
         shared_layout.addWidget(self.shared_field_label)
         main_layout.addWidget(self.shared_survey_widget)
-        global_controls_layout.addLayout(button_layout_2)
-        self.global_controls_widget.setLayout(global_controls_layout)
-        main_layout.addWidget(self.global_controls_widget)
-        self.map_layout.addWidget(self.canvas)
 
         central_widget = QWidget()
         central_widget.setLayout(main_layout)
-        # Table is hosted in the data workspace
-        map_widget = QWidget()
-        #Keep the export canvas alive outside the main tabs
-        self.original_map_widget = map_widget
-        map_widget.setLayout(self.map_layout)
-        # Original map retained for exports and legacy plot actions
         self.data_workspace = DataWorkspace(self)
         data_index = self.tabs.addTab(self.data_workspace, 'Data && Cleaning')
         self.tabs.setTabToolTip(data_index,
@@ -242,8 +128,8 @@ class MainWindow(SurveyActionsMixin, AnalysisTabMixin, LocationTabMixin, MapFiel
             '\u2022 Filters along the survey path smooth the signal or separate slow and fast changes\n'
             '   (low-, high- and band-pass, moving average, Savitzky\u2013Golay, linear detrend, VMD).\n'
             '\u2022 Map filters treat the survey as a grid (upward / downward continuation, reduction to pole).\n\n'
-            'Preview Filter shows the effect (Before / After / Difference, Spectrum); your data only changes when you click\n'
-            'Store filter result for anomaly analysis. Store several previews to compare them side by side in Compare Filters.\n'
+            'Apply Filter shows the effect (Before / After / Difference, Spectrum) and uses the result for anomaly analysis.\n'
+            'Store several results to compare them side by side in Compare Filters.\n'
             'Reset (Clear Filter) returns to the cleaned data.')
         self.analysis_widget = self.create_analysis_tab()
         analysis_index = self.tabs.addTab(self.analysis_widget, 'Automated Anomaly Analysis')
@@ -265,20 +151,14 @@ class MainWindow(SurveyActionsMixin, AnalysisTabMixin, LocationTabMixin, MapFiel
             'as a scatter, contour or satellite web map. The panel on the right lists the numbers behind the estimate,\n'
             'and Export location results saves them.\n\n'
             'A candidate is a place to check in the field, not a confirmed find.')
-        self.tabs.currentChanged.connect(self.update_global_controls_visibility)
         main_layout.addWidget(self.tabs)
         self.setCentralWidget(central_widget)
         self.setMinimumSize(1200, 760)
         self.resize(1500, 940)
         # self.apply_scientific_style() # commenting for now until we figure out the dark theme
-        self.global_controls_widget.hide()
 
-    def update_global_controls_visibility(self,index):
-        #Each workspace owns its controls. The active-survey header is always visible
-        self.global_controls_widget.hide()
-        self.shared_survey_widget.show()
-
-    def apply_scientific_style(self): # Sina: We need to find the right dark mode 
+    def apply_scientific_style(self): # Sina: We need to find the right dark mode
+        """Apply the application-wide light colour theme (Qt style sheet)."""
         self.setStyleSheet("""
             QMainWindow, QWidget { font-family: 'Segoe UI'; font-size: 10pt; color: #172b4d; background: #f4f7fb; }
             QToolBar { background: #15324f; padding: 8px; spacing: 14px; border: 0; }
@@ -314,46 +194,52 @@ class MainWindow(SurveyActionsMixin, AnalysisTabMixin, LocationTabMixin, MapFiel
             QAbstractSpinBox:disabled { color: #8793a3; background: #eef1f5; }
             QAbstractSpinBox::up-button, QAbstractSpinBox::down-button { width: 19px; }
         """)
-        # Replace the earlier dark per-page rules with the application-wide scientific theme.
-        self.analysis_widget.setStyleSheet('')
 
     def active_session(self):
+        """Survey shown in the window.
+
+        Returns
+        -------
+        processing.survey_session.SurveySession or None
+            The active survey, or None when no survey is loaded.
+        """
         index = getattr(self, 'active_dataset_index', None)
         if index is None or not 0 <= index < len(getattr(self, 'sessions', [])):
             return None
         return self.sessions[index]
 
-    #def sampling frequency
-    #   add ability to set sampling frequency and adjust the filters class so it's not static at d=1
-
-    #def rewind action
-    #   allows users to go back one step
-
-
-#%% General crash ERROR
 
 def errorMessage(etype, value, tb):
+    """Show an uncaught exception in a dialog (installed as sys.excepthook) instead of closing the app.
+
+    Parameters
+    ----------
+    etype : type
+        Exception class.
+    value : BaseException
+        The exception.
+    tb : traceback
+        Its traceback, shown under Show Details.
+    """
     print('ERROR begin:')
     traceback.print_exception(etype, value, tb)
     print('ERROR end.')
-    errorMsg = traceback.format_exception(etype, value, tb,limit=None, chain=True)
-    finalError =''
-    for errs in errorMsg:
-        finalError += errs
+    finalError = ''.join(traceback.format_exception(etype, value, tb, limit=None, chain=True))
     msg = QMessageBox()
     msg.setIcon(QMessageBox.Icon.Critical)
     msg.setText("<b>Critical error:</b>")
-    msg.setInformativeText('''Please see the detailed error below:''')
+    msg.setInformativeText('Please see the detailed error below:')
     msg.setWindowTitle("Error!")
-    msg.setDetailedText('%s' % (finalError))
+    msg.setDetailedText(finalError)
     msg.setStandardButtons(QMessageBox.StandardButton.Retry)
     msg.exec()
 
-def catchErrors():
-    sys.excepthook = errorMessage
-    threading.Thread.__init__
 
-#%% Executing app
+def catchErrors():
+    """Install errorMessage as the handler for uncaught exceptions."""
+    sys.excepthook = errorMessage
+
+
 if __name__ == '__main__':
     catchErrors() # prevent crash of the app
     app = QApplication(sys.argv)
@@ -374,10 +260,10 @@ if __name__ == '__main__':
     app.processEvents()
     progressBar.setValue(1)
     app.processEvents()
-    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas  # noqa: F401  (preloaded while the splash shows)
     progressBar.setValue(2)
     app.processEvents()
-    from matplotlib.figure import Figure
+    from matplotlib.figure import Figure  # noqa: F401  (preloaded while the splash shows)
     progressBar.setValue(3)
     app.processEvents()
     from ui.project_tools import ProjectTools
@@ -390,7 +276,6 @@ if __name__ == '__main__':
     from ui.confirm import confirm
     progressBar.setValue(6)
     app.processEvents()
-    from ui.map_field import MAP_VIEWS, TOTAL_FIELD, RESIDUAL_TREND, RESIDUAL_IGRF, FIELD_CHOICES
     progressBar.setValue(7)
     app.processEvents()
     from ui.theme import apply_matplotlib_theme

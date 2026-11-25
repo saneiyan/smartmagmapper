@@ -1,3 +1,9 @@
+"""GeoXAI: explanation of the anomaly analysis's candidate location.
+
+Combines a plain-language narrative and cluster evidence with explanations from a saved Random Forest model:
+global (mean absolute SHAP contribution of each neighbourhood feature over all score windows) and local (SHAP
+contributions for one chosen score window). See processing.xai_features and processing.xai_model.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -17,6 +23,27 @@ from processing.xai_model import (
 
 @dataclass
 class GeoXAIReport:
+    """Explanation of a candidate location.
+
+    Attributes
+    ----------
+    narrative : str
+        Plain-language explanation shown in the Explainable AI (XAI) view.
+    cluster_scores : pandas.DataFrame
+        Cluster evidence (support, spread...) used by the evidence chart.
+    contributions : pandas.DataFrame
+        Global feature contributions of the saved model.
+    metadata : dict
+        Model, feature and explanation details ('status' is 'available' when the saved-model explanation ran).
+    features : pandas.DataFrame
+        Feature table, one row per score window.
+    local_contributions : pandas.DataFrame
+        Feature contributions for the window shown in the local view (empty for the global view).
+    local_metadata : dict
+        Details of the local explanation (window identity, model output...).
+    display_narrative : str
+        Narrative for the view currently shown (exported instead of `narrative` when set).
+    """
     narrative: str
     cluster_scores: pd.DataFrame
     contributions: pd.DataFrame

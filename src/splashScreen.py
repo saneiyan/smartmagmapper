@@ -34,21 +34,49 @@ Below is a way to do it
 """
 
 class MySplashScreen(QSplashScreen):
+    """Splash screen showing an animation while the bundled app starts.
+
+    Parameters
+    ----------
+    animation : str
+        Path of the animated image (e.g. a GIF).
+    flags : Qt.WindowType
+        Window flags of the splash screen.
+    """
     def __init__(self, animation, flags):
         # run event dispatching in another thread
+        """Start the animation (see the class description)."""
         QSplashScreen.__init__(self, QPixmap(), flags)
         self.movie = QMovie(animation)
         self.movie.frameChanged.connect(self.onNextFrame)
         self.movie.start()
 
     def onNextFrame(self):
+        """Show the animation's current frame."""
         pixmap = self.movie.currentPixmap()
         self.setPixmap(pixmap)
         self.setMask(pixmap.mask())
 
 
 class MyZipFile(ZipFile):
+    """ZipFile that keeps the files' executable permissions when extracting (zipfile drops them by default)."""
     def extract(self, member, path=None, pwd=None):
+        """Extract one member and restore its Unix permissions (not on Windows).
+
+        Parameters
+        ----------
+        member : str or zipfile.ZipInfo
+            Archive member.
+        path : str, optional
+            Destination folder; the current folder by default.
+        pwd : bytes, optional
+            Archive password.
+
+        Returns
+        -------
+        str
+            Path of the extracted file.
+        """
         if not isinstance(member, ZipInfo):
             member = self.getinfo(member)
 

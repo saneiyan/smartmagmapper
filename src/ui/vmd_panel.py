@@ -14,6 +14,20 @@ EXCLUDE='#b45309'
 
 
 def exclusion_reason(row, selected):
+    """Plain-language reason a mode is kept or excluded by the automatic selection.
+
+    Parameters
+    ----------
+    row : pandas.Series
+        One row of the mode metrics (see data_analysis_pipeline.mode_metrics).
+    selected : list of int
+        Modes kept by the automatic recommendation.
+
+    Returns
+    -------
+    str
+        For example 'Keep — automatic recommendation' or 'Exclude — Noise-like'.
+    """
     if int(row['mode']) in selected:
         return 'Keep — automatic recommendation'
     reasons=[]
@@ -24,9 +38,22 @@ def exclusion_reason(row, selected):
 
 
 class VMDPanel(QWidget):
+    """VMD inspection panel: reconstruction, every mode trace with its variance ratio, and the selection table.
+
+    In the Filter Lab (editable=True) modes can be ticked in the table to change the reconstruction; the new
+    selection is emitted with selectionChanged.
+
+    Parameters
+    ----------
+    editable : bool, optional
+        Allow changing the retained modes.
+    parent : QWidget, optional
+        Parent widget.
+    """
     selectionChanged=pyqtSignal(object)
 
     def __init__(self, editable=False, parent=None):
+        """Build the summary label and the three views (see the class description)."""
         super().__init__(parent)
         self.editable=editable
         self._updating=False
@@ -51,6 +78,13 @@ class VMDPanel(QWidget):
         self.tabs.addTab(self.table,'Selection and Reasons')
 
     def clear(self, message='No decomposition for the current input.'):
+        """Remove the decomposition and show a message instead.
+
+        Parameters
+        ----------
+        message : str, optional
+            Text shown in the summary.
+        """
         self.payload=None
         self._updating=True;self.table.setRowCount(0);self._updating=False
         self.summary.setText(message)
@@ -58,11 +92,31 @@ class VMDPanel(QWidget):
             fig.clear();canvas.draw_idle()
 
     def set_data(self, axis, signal, modes, metrics, selected, axis_label='Time (s)', automatic=None):
+        """Show a decomposition.
+
+        Parameters
+        ----------
+        axis : array_like
+            Time (or distance) of each sample.
+        signal : array_like
+            Decomposed input signal.
+        modes : array_like
+            Array of shape (n_modes, n_samples).
+        metrics : pandas.DataFrame
+            Mode metrics (see data_analysis_pipeline.mode_metrics).
+        selected : list of int
+            Modes currently kept.
+        axis_label : str, optional
+            Label of the horizontal axis.
+        automatic : list of int, optional
+            Modes the automatic recommendation keeps; defaults to `selected`.
+        """
         self.payload=(np.asarray(axis),np.asarray(signal),np.asarray(modes),metrics.copy(),list(selected),axis_label,
                       list(selected) if automatic is None else list(automatic))
         self._draw()
 
     def _draw(self):
+        """Redraw the reconstruction, the mode traces and the selection table from the stored data."""
         x,y,modes,metrics,selected,label,automatic=self.payload
         base=float(np.median(y))
         reconstructed=modes[np.array(selected,dtype=int)-1].sum(axis=0)+base if selected else np.full(len(y),base)
@@ -114,6 +168,15 @@ class VMDPanel(QWidget):
         self._updating=False
 
     def _selection_changed(self,item):
+        """Rebuild the reconstruction after a Keep box is ticked or unticked, and emit selectionChanged.
+
+        At least one mode must stay selected.
+
+        Parameters
+        ----------
+        item : QTableWidgetItem
+            The changed table cell.
+        """
         if self._updating or item.column()!=0 or self.payload is None:return
         selected=[int(self.table.item(i,1).text()) for i in range(self.table.rowCount())
                   if self.table.item(i,0).checkState()==Qt.CheckState.Checked]

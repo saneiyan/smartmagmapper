@@ -4,6 +4,7 @@ from processing.labels import FIELD_COLUMNS, field_label
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
 from matplotlib.figure import Figure
+import json
 import numpy as np
 from pathlib import Path
 from processing import map_maker as mm
@@ -19,7 +20,18 @@ class ExportsMixin:
     """
 
     def is_imported_file(self, path):
-        """True if path is one of the imported source files, so exports never overwrite raw data."""
+        """Check whether a path is one of the imported source files, so exports never overwrite raw data.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path
+            Planned output path.
+
+        Returns
+        -------
+        bool
+            True if the path is an imported survey file.
+        """
         target = Path(path).resolve()
         for index in range(self.select_file.count()):
             source = self.select_file.itemData(index, Qt.ItemDataRole.UserRole)
@@ -28,6 +40,11 @@ class ExportsMixin:
         return False
 
     def export_dialog(self):
+        """Open File > Export Data for the active survey and write the chosen exports.
+
+        The base name is suggested next to the source file, and the GeoTIFF cell size defaults to about 200 cells across
+        the survey, rounded to 1, 2, 2.5 or 5 x 10^n metres.
+        """
         session = self.active_session()
         if session is None:
             self.statusBar().showMessage('No data to export. Import a dataset first.')
@@ -65,7 +82,17 @@ class ExportsMixin:
             self.export_data(dialog.options())
 
     def export_data(self, options):
-        """Write the exports chosen in the Export Data dialog (see DataExportDialog.options)."""
+        """Write the exports chosen in the Export Data dialog.
+
+        CSV tables get the unit in their magnetic column names; maps are drawn off-screen, so they export even while the
+        web map is shown; the GeoTIFF is written by MapMaker.saveMap with the processing recorded in its metadata.
+        Existing files are only overwritten after confirmation and imported files never.
+
+        Parameters
+        ----------
+        options : dict
+            Choices from DataExportDialog.options: 'csv', 'maps', 'map_style', 'signals', 'figure_format' and 'raster'.
+        """
         session = self.active_session()
         workspace = self.data_workspace
         frames = {'cleaned': session.cleaned, 'synchronized': workspace.raw, 'current': session.working}
@@ -106,24 +133,66 @@ class ExportsMixin:
                         page.canvas.figure.savefig(path, dpi=dpi)
                         written.append(path)
                 if raster:
-                    frame = frames[raster['dataset']]
-                    low, high = workspace.map_limits(raster['field'])
+                    dataset = raster['dataset']
+                    frame = frames[dataset]
+                    description, tags = self.raster_metadata(session, dataset, raster['field'])
+                    if dataset == 'current':
+                        # a filtered field has its own range (e.g. centred on zero); colour it by that range
+                        low = high = None
+                    else:
+                        low, high = workspace.map_limits(raster['field'])
                     info = mm.MapMaker(None).saveMap(
                         str(raster['path']), df=frame, value_column=raster['field'], cell_size=raster['cell_size'],
                         method=raster['method'], projection=raster['projection'], output=raster['output'], vmin=low, vmax=high,
-                        units=session.field_unit,
-                        cmap=workspace.map_colors.currentData())
+                        units=session.field_unit, cmap=workspace.map_colors.currentData(),
+                        description=description, tags=tags)
                     written.append(raster['path'])
         except Exception as exc:
-            done = f'\n\nFiles written before the error:\n' + '\n'.join(p.name for p in written) if written else ''
+            done = '\n\nFiles written before the error:\n' + '\n'.join(p.name for p in written) if written else ''
             QMessageBox.warning(self, 'Export Data', f'Export failed:\n{exc}{done}')
             self.statusBar().showMessage('Export failed.')
             return
         detail = f' | raster {info["width"]} x {info["height"]} cells, {info["crs"]}' if raster else ''
         self.statusBar().showMessage(f'Exported {len(written)} file(s) to {targets[0].parent}{detail}', 12000)
 
+    def raster_metadata(self, session, dataset, column):
+        """Description and metadata tags that record what a GeoTIFF holds and how it was processed.
+
+        Parameters
+        ----------
+        session : processing.survey_session.SurveySession
+            Survey being exported.
+        dataset : {'synchronized', 'cleaned', 'current'}
+            Which version of the survey the raster is made from.
+        column : str
+            Field column rasterized, e.g. 'BT' or 'X'.
+
+        Returns
+        -------
+        description : str
+            What the values are, e.g. 'Total Magnetic Field (BT) (nT) → High-pass'.
+        tags : dict
+            Source survey, dataset, cleaning settings and, for the current field, the filter history as JSON.
+        """
+        stages = {'synchronized': 'Synchronized Data (Before Cleaning)', 'cleaned': 'Cleaned Data (After Cleaning)',
+                  'current': 'Current field (with applied filters)'}
+        tags = {'source_survey': Path(session.path).name, 'dataset': stages[dataset]}
+        if dataset != 'synchronized' and session.cleaning_key:
+            startup, mad, percentile = session.cleaning_key
+            tags['cleaning'] = f'startup samples {startup}, MAD multiplier {mad:g}, fallback percentile {percentile:g}'
+        if dataset == 'current' and session.filter_history:
+            description = self.current_map_field_name()
+            tags['filter_history'] = json.dumps(session.filter_history, ensure_ascii=False, default=str)
+        else:
+            description = field_label(column, session.field_unit)
+        return description, tags
+
     def export_analysis_results(self):
-        """Save the Automated Anomaly Analysis results: scored points, candidate clusters, summary and engineering map."""
+        """Save the Automated Anomaly Analysis results.
+
+        Writes the scored points (CSV, magnetic columns with their unit), the candidate clusters, the summary text, the
+        location map and, when available, the GeoXAI explanation, contributions, cluster scores and figure.
+        """
         if self.analysis_annotated_df is None:
             self.statusBar().showMessage('No anomaly analysis results to export. Import a dataset first.')
             return

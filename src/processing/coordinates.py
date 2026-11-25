@@ -23,7 +23,26 @@ _NUMBER = re.compile(r'[-+]?\d+(?:\.\d+)?')
 
 
 def _parse_angle(value, minutes_parts):
-    """One angle written as degrees with minutes (minutes_parts=2) or minutes and seconds (3)."""
+    """Read one latitude or longitude written as degrees with minutes, or with minutes and seconds.
+
+    Parameters
+    ----------
+    value : str or float
+        Text such as 45°07'24.4"N, '45 7 24.4 N', '-75 39.15', or a packed number (NMEA dddmm.mmm or dddmmss.s).
+        A leading minus sign or an S/W hemisphere letter makes the angle negative.
+    minutes_parts : int
+        2 for degrees + decimal minutes, 3 for degrees-minutes-seconds.
+
+    Returns
+    -------
+    float
+        Angle in decimal degrees (NaN for empty values).
+
+    Raises
+    ------
+    ValueError
+        If the text holds no number, too many parts, or minutes/seconds of 60 or more.
+    """
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return np.nan
     text = str(value).strip()
@@ -56,7 +75,25 @@ def _parse_angle(value, minutes_parts):
 
 
 def angles_to_decimal_degrees(values, fmt):
-    """Series of latitudes or longitudes in fmt -> decimal degrees."""
+    """Convert a column of latitudes or longitudes to decimal degrees.
+
+    Parameters
+    ----------
+    values : array_like
+        Angles in the format `fmt`.
+    fmt : {'decimal_degrees', 'degrees_minutes', 'dms'}
+        How the angles are written.
+
+    Returns
+    -------
+    numpy.ndarray
+        Angles in decimal degrees (NaN where a value is empty or, for decimal degrees, not a number).
+
+    Raises
+    ------
+    ValueError
+        For an unknown format or an unreadable angle.
+    """
     series = pd.Series(values)
     if fmt == 'decimal_degrees':
         return pd.to_numeric(series, errors='coerce').to_numpy(dtype=float)
@@ -67,9 +104,29 @@ def angles_to_decimal_degrees(values, fmt):
 
 
 def to_decimal_degrees(first, second, fmt, epsg=None):
-    """Two coordinate columns -> (latitude, longitude) in decimal degrees.
+    """Convert two coordinate columns to latitude and longitude in decimal degrees (WGS 84).
 
-    For angle formats, first/second are latitude/longitude; for 'projected' they are easting/northing in metres.
+    Parameters
+    ----------
+    first, second : array_like
+        Latitude and longitude for the angle formats; easting and northing in metres for 'projected'.
+    fmt : {'decimal_degrees', 'degrees_minutes', 'dms', 'projected'}
+        How the coordinates are written (see FORMATS).
+    epsg : int or str, optional
+        EPSG code of the projected coordinate system; required when fmt is 'projected'.
+
+    Returns
+    -------
+    lat : numpy.ndarray
+        Latitudes in decimal degrees.
+    lon : numpy.ndarray
+        Longitudes in decimal degrees.
+
+    Raises
+    ------
+    ValueError
+        If the EPSG code is missing, unknown or not a projected system, if no coordinate can be read, or if
+        converted values fall outside ±90° latitude / ±180° longitude.
     """
     if fmt == 'projected':
         if not epsg:

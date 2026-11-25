@@ -1,4 +1,7 @@
-"""Folium web maps of survey data (no PyQt: usable from scripts). The on-screen widget is ui.web_map_widget."""
+"""Folium web maps of survey data (no PyQt: usable from scripts); the app shows them in a QWebEngineView.
+
+Maps use Google satellite/hybrid imagery, with historical Esri Wayback imagery layers where available.
+"""
 import json
 import re
 import tempfile
@@ -202,6 +205,22 @@ def build_map(df, value_column='BT', caption=None, vmin=None, vmax=None, colors=
 
 def color_map(bt, vmin=None, vmax=None, colors=None):
     #use the regular map's scale when one was set, otherwise the same default range
+    """Linear colour map for a web map's points and legend.
+
+    Parameters
+    ----------
+    bt : array_like
+        Values to be coloured.
+    vmin, vmax : float, optional
+        Colour limits; the 2nd and 98th percentiles of `bt` when not given or when vmin >= vmax.
+    colors : list of str, optional
+        Colour ramp; defaults to blue, green, yellow.
+
+    Returns
+    -------
+    branca.colormap.LinearColormap
+        The colour map.
+    """
     lo = vmin if vmin is not None else np.nanpercentile(bt, 2)
     hi = vmax if vmax is not None else np.nanpercentile(bt, 98)
     if lo >= hi:

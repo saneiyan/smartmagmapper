@@ -4,9 +4,11 @@ SmartMagMapper is a desktop application for processing and interpreting magnetic
 
 ## What Is Included
 
-This repository contains the application source code.
+This repository contains the application source code in `src/`, example surveys in `src/examples/` and the build
+scripts for the stand-alone app (`src/build-app.sh`, `src/build-windows.bat`, PyInstaller `.spec` files and
+`splashScreen.py`).
 
-The code is split into two packages:
+The code in `src/` is split into two packages:
 
 - Graphical User Interface (`GUI.py`) - the main window and the application launcher (run this file). It builds the window and its tabs; its behaviour comes from these modules in `src/ui/`: `survey_actions.py` (import and cleaning actions), `analysis_tab.py` (Anomaly Analysis tab), `location_tab.py` (Location Estimate tab), `map_field.py` (current map field and map filters) and `exports.py` (File > Export Data).
 - `src/ui/` - the rest of the user interface (PyQt6):
@@ -16,12 +18,14 @@ The code is split into two packages:
   - `theme.py`, `table_model.py`, `web_map_widget.py`, `busy.py`, `confirm.py` - styling, tables, the web-map view and shared pop-ups.
 - Application Programming Interface (API: `src/processing/`) - data processing with no PyQt6 dependency, usable from scripts:
   - `data_analysis_pipeline.py` - survey import, synchronization, cleaning, suggested cleaning settings and anomaly analysis.
-  - `scientific_filters.py` - Filter Lab filters; `map_filter.py` - map transforms (residual fields, continuation, reduction to pole, VMD).
-  - `geoxai_interpreter.py` - explanation layer for anomaly candidates; `survey_session.py`, `project_io.py` - survey state and project files.
-  - `map_maker.py` - maps and GeoTIFF export; `web_map.py` - web maps (folium); `comparison_spectrum.py`, `excel_reader.py` - supporting functions.
+  - `scientific_filters.py` - Filter Lab filters (time/path-series filters, VMD, continuation and reduction to pole).
+  - `geoxai_interpreter.py` - explanation layer for anomaly candidates; `xai_features.py`, `xai_model.py` and `models/` - the saved Random Forest model and its global and local SHAP explanations.
+  - `survey_session.py`, `project_io.py` - survey state and project files.
+  - `map_maker.py` - maps and GeoTIFF export; `web_map.py` - web maps (folium); `comparison_spectrum.py` - filter comparison spectra.
+  - `labels.py`, `coordinates.py` - magnetic units and display names; coordinate format conversion.
 - `requirements.txt` - Python packages needed to run the app.
 
-For example, a script can run the processing without the interface:
+For example, a script run from the `src` folder can run the processing without the interface:
 
 ```python
 from processing import data_analysis_pipeline as dap
@@ -29,7 +33,9 @@ mag, gps = dap.read_survey_file('survey.xlsx')
 cleaned, audit = dap.clean_survey(mag, gps, dap.AnalysisParams())
 ```
 
-Survey data files are not included in this repository. Each user should load survey files from their own computer using the app.
+Every function and class has a NumPy-style docstring describing its parameters and return values, e.g. `help(dap.clean_survey)`.
+
+Example surveys are in `src/examples/` (including the Saneiyan and Mansourian 2023 and Stauffer et al. 2026 data sets); load your own survey files from your computer using the app. The Explainable AI model explanations are only available for surveys inside the area its reference model was trained on (the Butkowsky 1A examples); elsewhere the app explains the candidate from the cluster evidence alone.
 
 ## Install
 
@@ -44,6 +50,7 @@ python -m pip install -r requirements.txt
 ## Run The App
 
 ```powershell
+cd src
 python GUI.py
 ```
 
@@ -55,6 +62,10 @@ python GUI.py
 4. Review the cleaning, filters, anomaly analysis and location estimate in the main tabs.
 
 Survey files need magnetometer data (X/Y/Z components or total field) and GPS positions with timestamps. Excel workbooks may keep them on separate `Magnetometer` and `Location` sheets.
+
+### Reduction to pole field direction
+
+Reduction to pole (Filter Lab) needs the inclination and declination of the Earth's field at the survey. Choose the survey date and click `Estimate from IGRF` to fill them in from the IGRF model (via `ppigrf`, dates 1900-2029) at the survey's centre, or type known values. The direction used, and whether it came from IGRF, is recorded in the processing record, the exports and the GeoTIFF metadata.
 
 ### Units and coordinate formats
 
@@ -108,7 +119,7 @@ For collaborators:
 
 1. Clone or download this repository.
 2. Install packages using `python -m pip install -r requirements.txt`.
-3. Run `python GUI.py`.
+3. Run `python GUI.py` from the `src` folder.
 4. Import a survey file from local storage.
 
 Do not upload private field survey files unless the project owner approves sharing those data.

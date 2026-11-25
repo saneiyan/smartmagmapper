@@ -1,7 +1,7 @@
 """Immutable filter previews compared on identical survey rows and input values."""
 from ui.theme import compact_toolbar
 from processing.comparison_spectrum import comparison_spectra
-from ui.busy import busy, show_status
+from ui.busy import busy, show_status, loading
 from processing import labels
 from processing.labels import signal_label
 from copy import deepcopy
@@ -14,7 +14,18 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas,NavigationToolbar2QT
 
 class FilterComparison(QWidget):
+    """Compare Filters tab: stored filter results (A, B, C...) compared on identical survey rows and input.
+
+    The tab shows the comparison plot; its controls (self.panel) sit in the Filter Lab's settings panel and are only
+    shown while this tab is open. Stored results are cleared when the survey or its cleaning changes.
+
+    Parameters
+    ----------
+    lab : FilterWorkspace
+        The Filter Lab that owns this tab.
+    """
     def __init__(self,lab):
+        """Build the plot, the record text and the Compare filters control panel."""
         super().__init__();self.lab=lab;self.slots={};self.session_key=None;self.next_index=0;self._export_all=False
         # The tab itself only shows the comparison plot; its controls live in self.panel, which the Filter Lab
         # places in its settings panel and shows only while this tab is open.
@@ -45,23 +56,50 @@ class FilterComparison(QWidget):
         self.export=QPushButton('Export shown');self.export.setToolTip('Export the results in the plot: values, settings and the figure.');self.export.clicked.connect(self.export_saved)
         self.export_all=QPushButton('Export all');self.export_all.setToolTip('Export every stored result: values, settings and an overlay figure.');self.export_all.clicked.connect(self.export_library)
         exports.addWidget(self.export,1);exports.addWidget(self.export_all,1);panel.addLayout(exports)
-        self.message=QLabel('No stored results yet. Preview a filter, then click Store filter results for comparison.');self.message.setWordWrap(True)
+        self.message=QLabel('No stored results yet. Apply a filter, then click Store filter results for comparison.');self.message.setWordWrap(True)
         panel.addWidget(self.message)
         self.draw()
 
     def notify(self,text):
-        """Show a message in the Compare filters box and the status bar (visible from any tab)."""
+        """Show a message in the Compare filters box and the status bar (visible from any tab).
+
+        Parameters
+        ----------
+        text : str
+            Message.
+        """
         self.message.setText(text);show_status(self.lab,text,8000)
 
     def selected_name(self):
+        """Name of the stored result selected in the list.
+
+        Returns
+        -------
+        str or None
+            For example 'A', or None when nothing is selected.
+        """
         item=self.library.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
 
     def selection_changed(self,*_):
+        """Enable the buttons that need a selected result.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         selected=self.selected_name() in self.slots
         self.clear.setEnabled(selected);self.use.setEnabled(selected)
 
     def key(self):
+        """Identity of the active survey and its cleaned data; stored results are only valid for this key.
+
+        Returns
+        -------
+        tuple or None
+            (session id, path, cleaning settings, hash of the cleaned data), or None without a survey.
+        """
         session=self.lab.get_session()
         if session is None:return None
         frame=session.cleaned
@@ -69,15 +107,30 @@ class FilterComparison(QWidget):
         return (id(session),session.path,session.cleaning_key,digest)
 
     def session_changed(self):
+        """Clear the stored results if the survey or its cleaning changed."""
         key=self.key()
         if key!=self.session_key:
             self.slots.clear();self.next_index=0;self.session_key=key;self.refresh_library();self.draw()
             self.message.setText('Stored results cleared because the survey or cleaning changed.')
 
     def save_preview(self,name):
+        """Store the Filter Lab's current preview under a name.
+
+        Results can only be compared on the same input, so a preview of a different signal or cleaned baseline is refused.
+
+        Parameters
+        ----------
+        name : str
+            Name to store it under, e.g. 'A'.
+
+        Returns
+        -------
+        bool
+            True if stored.
+        """
         self.session_changed();r=self.lab.result;session=self.lab.get_session()
         if r is None or session is None:
-            self.notify('Create a valid preview before storing it for comparison.');return False
+            self.notify('Apply a filter before storing it for comparison.');return False
         # Reject comparisons with different input values, even if lengths match.
         for other,item in self.slots.items():
             if other==name:continue
@@ -90,6 +143,7 @@ class FilterComparison(QWidget):
         return True
 
     def clear_slot(self):
+        """Delete the selected stored result."""
         name=self.selected_name()
         if name not in self.slots:self.notify('Select a stored result in the list first.');return
         self.slots.pop(name,None);self.refresh_library();self.draw()
@@ -98,13 +152,31 @@ class FilterComparison(QWidget):
 
     @staticmethod
     def preview_name(index):
+        """Spreadsheet-style name of a stored result.
+
+        Parameters
+        ----------
+        index : int
+            Zero-based index.
+
+        Returns
+        -------
+        str
+            'A' ... 'Z', then 'AA', 'AB', ...
+        """
         name='';index+=1
         while index:
             index,remainder=divmod(index-1,26);name=chr(65+remainder)+name
         return name
 
     def add_preview(self):
-        """Store the current preview under the next free name (A, B, C, ...) and show the comparison."""
+        """Store the current preview under the next free name (A, B, C, ...) and show the comparison.
+
+        Returns
+        -------
+        bool
+            True if stored.
+        """
         self.session_changed()
         self.next_index=0
         while self.preview_name(self.next_index) in self.slots:self.next_index+=1
@@ -113,11 +185,19 @@ class FilterComparison(QWidget):
         self.next_index+=1
         self.lab.tabs.setCurrentWidget(self)
         self.notify(f'Stored result {name}: {self.lab.settings_description(self.slots[name]["result"].settings)}. '
-                    'Change the filter or its settings, preview again and store another to compare.')
+                    'Change the filter or its settings, apply it again and store another to compare.')
         return True
 
     def refresh_library(self,select=None):
-        """Rebuild the stored-results list, keeping ticks and the selection (or selecting `select`)."""
+        """Rebuild the stored-results list, keeping ticks and the selection.
+
+        New results are ticked while fewer than three are ticked.
+
+        Parameters
+        ----------
+        select : str, optional
+            Name to select instead of the current selection.
+        """
         checked={self.library.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.library.count()) if self.library.item(i).checkState()==Qt.CheckState.Checked}
         known={self.library.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.library.count())}
         target=select or self.selected_name()
@@ -133,26 +213,60 @@ class FilterComparison(QWidget):
         self.library.blockSignals(False);self.selection_changed()
 
     def library_changed(self,item):
+        """A result was ticked or unticked: allow at most three, then redraw.
+
+        Parameters
+        ----------
+        item : QListWidgetItem
+            The changed entry.
+        """
         if len(self.visible_names())>3:
             self.library.blockSignals(True);item.setCheckState(Qt.CheckState.Unchecked);self.library.blockSignals(False)
             self.notify('Tick up to three for readable side-by-side plots. Untick another, or choose an overlay plot to see them all.')
         self.draw()
 
     def visible_names(self):
+        """Names of the ticked stored results.
+
+        Returns
+        -------
+        list of str
+            Names in list order.
+        """
         return [self.library.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.library.count()) if self.library.item(i).checkState()==Qt.CheckState.Checked and self.library.item(i).data(Qt.ItemDataRole.UserRole) in self.slots]
 
     def export_library(self):
+        """Export every stored result (values, settings and an overlay figure).
+
+        Returns
+        -------
+        bool
+            True if exported.
+        """
         self._export_all=True;previous=self.view.currentIndex();self.view.setCurrentIndex(5 if previous in (4,5) else 3)
         try:return self.export_saved()
         finally:
             self._export_all=False;self.view.setCurrentIndex(previous)
 
     def draw(self,*_):
+        """Redraw the comparison plot with a loading message over it (see _draw).
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
+        with loading(self.canvas,'Drawing filter comparison...'):
+            self._draw()
+
+    def _draw(self):
+        """Draw the chosen comparison: filtered maps, input and filtered traces, removed signal, an overlay of every
+        stored trace, or Welch spectra (side by side or overlaid)."""
         self.figure.clear();names=list(self.slots) if self.view.currentIndex() in (3,5) else self.visible_names()
         self.export.setEnabled(bool(names));self.export_all.setEnabled(bool(self.slots));self.selection_changed()
         if not names:
             text=('Tick a stored result in the Compare filters box to plot it.' if self.slots else
-                  'Preview a filter, then click "Store filter results for comparison" to compare filters here.')
+                  'Apply a filter, then click "Store filter results for comparison" to compare filters here.')
             ax=self.figure.add_subplot();ax.text(.5,.5,text,ha='center',va='center',wrap=True);ax.set_axis_off();self.record.setText('');self.canvas.draw_idle();return
         if self.view.currentIndex() in (4,5):
             try:
@@ -197,10 +311,32 @@ class FilterComparison(QWidget):
         self.record.setText('\n'.join(records));self.canvas.draw_idle()
 
     def spectra(self,names):
+        """Welch spectra of the shared input and the named stored results.
+
+        Parameters
+        ----------
+        names : list of str
+            Stored results to include.
+
+        Returns
+        -------
+        tuple
+            (frequency, densities, metadata) as returned by comparison_spectrum.comparison_spectra.
+        """
         first=self.slots[names[0]]
-        return comparison_spectra(first['frame']['Time (s)'],{'Input':first['result'].before,**{n:self.slots[n]['result'].after for n in names}})
+        return comparison_spectra(first['frame']['Time (s)'],{'Input':first['result'].before,**{n:self.slots[n]['result'].after for n in names}},unit=labels.display_unit())
 
     def use_saved(self):
+        """Make the selected stored result the current field for anomaly analysis.
+
+        Its recorded settings are loaded back into the Filter Lab and applied. A result computed on a previous filter
+        result is only reusable while that input is unchanged.
+
+        Returns
+        -------
+        bool
+            True if applied.
+        """
         self.session_changed();name=self.selected_name();item=self.slots.get(name);session=self.lab.get_session()
         if item is None or session is None:self.notify('Select a stored result in the list first.');return False
         r=deepcopy(item['result'])
@@ -227,6 +363,14 @@ class FilterComparison(QWidget):
         return ok
 
     def export_saved(self):
+        """Export the compared results: values (input, filtered, difference), settings, the figure and, for
+        spectrum views, the spectra and their settings.
+
+        Returns
+        -------
+        bool
+            True if exported.
+        """
         self.session_changed();names=list(self.slots) if self._export_all or self.view.currentIndex() in (3,5) else self.visible_names()
         if not names:return False
         path,_=QFileDialog.getSaveFileName(self,'Export filter approaches','','CSV files (*.csv)')
@@ -237,7 +381,7 @@ class FilterComparison(QWidget):
         if any(getattr(owner,'is_imported_file',lambda _:False)(p) for p in targets):self.notify('Choose a name that preserves the imported data.');return False
         try:
             data=self.slots[names[0]]['frame'][['Time (s)','Easting (m)','Northing (m)']].copy()
-            unit=labels.display_unit()  # exported column names carry the survey's unit
+            unit=labels.display_unit()
             data[f'Input ({unit})']=self.slots[names[0]]['result'].before
             for n in names:
                 r=self.slots[n]['result'];data[f'{n} Filtered ({unit})']=r.after;data[f'{n} Difference ({unit})']=r.after-r.before

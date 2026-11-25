@@ -3,10 +3,28 @@ from PyQt6.QtWidgets import QMessageBox
 
 
 def confirm(parent, title, question, detail='', yes_text='Yes', no_text='No'):
-    """Ask `question`; returns True only if the user clicks the Yes button.
+    """Ask a yes/no question before an action that resets or discards the user's work.
 
     No is the default button, so pressing Enter or Esc never confirms by accident.
     macOS hides dialog titles, so the question itself is the bold heading.
+
+    Parameters
+    ----------
+    parent : QWidget
+        Window the dialog belongs to.
+    title : str
+        Dialog title.
+    question : str
+        The question, shown as the heading.
+    detail : str, optional
+        Explanation shown under the question.
+    yes_text, no_text : str, optional
+        Button texts.
+
+    Returns
+    -------
+    bool
+        True only if the user clicked the yes button.
     """
     box = QMessageBox(QMessageBox.Icon.Question, title, question,
                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, parent)

@@ -24,8 +24,9 @@ from PyQt6.QtWebEngineCore import QWebEngineSettings
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from pathlib import Path
-from ui.theme import panel_toggle, TabArrows, plot_palette
+from ui.theme import panel_toggle, plot_palette
 from ui.vmd_panel import VMDPanel
+from ui.busy import loading, watch_web_view
 from ui.xai_help import FEATURE_HELP, show_picked_feature
 from processing import data_analysis_pipeline as dap
 from processing import geoxai_interpreter as gx
@@ -39,86 +40,20 @@ class AnalysisTabMixin:
     """
 
     def create_analysis_tab(self):
+        """Build the Automated Anomaly Analysis tab: the settings panel (reference location, window, threshold and
+        clustering settings, summary) and the result views (magnetic field, VMD modes, anomaly scores, Explainable AI
+        with global / local SHAP views and the window selector). The location views created here move to the Location
+        Estimate tab.
+
+        Returns
+        -------
+        QWidget
+            The tab page.
+        """
         widget = QWidget()
-        widget.setObjectName('analysisPage')
         root_layout = QVBoxLayout(widget)
         root_layout.setContentsMargins(10, 10, 10, 10)
         root_layout.setSpacing(10)
-        #widget.setStyleSheet("""
-        #    QWidget#analysisPage {
-        #        background: #111827;
-        #        color: #E5E7EB;
-        #    }
-        #    QWidget#analysisPage QGroupBox {
-        #        border: 1px solid #374151;
-        #        border-radius: 6px;
-        #        margin-top: 14px;
-        #        padding: 10px;
-        #        font-weight: 600;
-        #    }
-        #    QWidget#analysisPage QGroupBox::title {
-        #        subcontrol-origin: margin;
-        #        left: 10px;
-        #        padding: 0 4px;
-        #    }
-        #    QWidget#analysisPage QPushButton {
-        #        min-height: 30px;
-        #        border: 1px solid #4B5563;
-        #        border-radius: 5px;
-        #        background: #1F2937;
-        #        color: #F9FAFB;
-        #    }
-        #    QWidget#analysisPage QPushButton:hover {
-        #        background: #263244;
-        #        border-color: #64748B;
-        #    }
-        #    QWidget#analysisPage QComboBox {
-        #        background: #1F2937;
-        #        color: #F9FAFB;
-        #        border: 1px solid #4B5563;
-        #        border-radius: 5px;
-        #        min-height: 28px;
-        #        padding: 4px;
-        #    }
-        #    QWidget#analysisPage QComboBox::drop-down {
-        #        border: none;
-        #    }
-        #    QWidget#analysisPage QComboBox QAbstractItemView {
-        #        background: #1F2937;
-        #        color: #F9FAFB;
-        #        selection-background-color: #4B5563;
-        #    }
-        #    QWidget#analysisPage QDoubleSpinBox,
-        #    QWidget#analysisPage QSpinBox,
-        #    QWidget#analysisPage QTextEdit {
-        #        background: #1F2937;
-        #        color: #F9FAFB;
-        #        border: 1px solid #4B5563;
-        #        border-radius: 5px;
-        #        min-height: 28px;
-        #    }
-        #    QWidget#analysisPage QTabWidget::pane {
-        #        border: 1px solid #374151;
-        #        border-radius: 6px;
-        #        background: #0F172A;
-        #    }
-        #    QWidget#analysisPage QTabBar::tab {
-        #        background: #1F2937;
-        #        color: #D1D5DB;
-        #        padding: 8px 14px;
-        #        border: 1px solid #374151;
-        #        border-bottom: none;
-        #        min-width: 96px;
-        #    }
-        #    QWidget#analysisPage QTabBar::tab:selected {
-        #        background: #F9FAFB;
-        #        color: #111827;
-        #    }
-        #    QWidget#analysisPage QScrollArea {
-        #        border: none;
-        #        background: #111827;
-        #    }
-        #""")
 
         controls = QGroupBox('Workflow and parameters')
         controls_layout = QVBoxLayout()
@@ -189,21 +124,9 @@ class AnalysisTabMixin:
         form.addRow('DBSCAN eps (m)', self.analysis_dbscan_eps)
         form.addRow('DBSCAN min samples', self.analysis_min_samples)
 
-        button_column = QVBoxLayout()
-        self.analysis_apply_button = QPushButton('Update Results')
-        self.analysis_apply_button.clicked.connect(self.run_anomaly_analysis)
-        self.analysis_export_button = QPushButton('Export Results')
-        self.analysis_export_button.clicked.connect(self.export_analysis_results)
-        self.analysis_export_button.setEnabled(False)
-        for button in [
-            self.analysis_apply_button,
-            self.analysis_export_button,
-        ]:
-            button_column.addWidget(button)
-
+        # Tools > Recalculate Analysis and File > Export Analysis Results run and export the analysis.
         controls_layout.addLayout(form)
         controls_layout.addSpacing(8)
-        controls_layout.addLayout(button_column)
         controls.setLayout(controls_layout)
 
         self.analysis_summary = QTextEdit()
@@ -231,6 +154,7 @@ class AnalysisTabMixin:
         self.analysis_visual_tabs.setDocumentMode(True)
 
         self.analysis_web_map = QWebEngineView()
+        watch_web_view(self.analysis_web_map, 'Loading location web map...')
         self.analysis_web_map.settings().setAttribute(
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
         )
@@ -253,9 +177,6 @@ class AnalysisTabMixin:
         self.analysis_field_canvas.setMinimumHeight(280)
 
         self.analysis_vmd_panel = VMDPanel(editable=False)
-        self.analysis_modes_figure = Figure(figsize=(8.5, 4.8), constrained_layout=True)
-        self.analysis_modes_canvas = FigureCanvas(self.analysis_modes_figure)
-        self.analysis_modes_canvas.setMinimumHeight(280)
 
         self.analysis_geoxai_text = QTextEdit()
         self.analysis_geoxai_text.setReadOnly(True)
@@ -265,10 +186,19 @@ class AnalysisTabMixin:
         self.analysis_geoxai_canvas = FigureCanvas(self.analysis_geoxai_figure)
         self.analysis_geoxai_canvas.setMinimumHeight(280)
 
-        self.analysis_figure = self.analysis_cluster_figure
-        self.analysis_canvas = self.analysis_cluster_canvas
-
         def plot_page(canvas):
+            """Wrap a figure canvas in a page with margins.
+
+            Parameters
+            ----------
+            canvas : FigureCanvasQTAgg
+                Canvas to show.
+
+            Returns
+            -------
+            QWidget
+                The page.
+            """
             page = QWidget()
             layout = QVBoxLayout(page)
             layout.setContentsMargins(12, 12, 12, 12)
@@ -374,10 +304,6 @@ class AnalysisTabMixin:
         settings_column.addWidget(controls_scroll, 1)
         settings_column.addStretch(0)  # keeps the toggle at the top while the panel is collapsed
 
-        # Previous / next view: small arrows at the right end of the sub-tab bar.
-        #self.analysis_tab_arrows = TabArrows(self.analysis_visual_tabs)
-        #self.previous_stage, self.next_stage = self.analysis_tab_arrows.previous, self.analysis_tab_arrows.next
-
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.analysis_splitter = splitter
         splitter.addWidget(self.analysis_settings_column)
@@ -406,14 +332,16 @@ class AnalysisTabMixin:
             #the clear button empties the field without finishing an edit
             reference_field.textChanged.connect(lambda text: None if text else self.reference_coordinates_changed())
 
-        # Initialize the dataset selector with any existing datasets
-        if hasattr(self, 'df_list') and self.df_list:
-            self._populate_dataset_selector()
-
         return widget
 
     def analysis_settings_toggled(self, visible):
-        """Shrink the splitter section to the toggle while collapsed; restore the split when reopened."""
+        """Shrink the splitter section to the toggle while collapsed; restore the split when reopened.
+
+        Parameters
+        ----------
+        visible : bool
+            Whether the settings panel is now shown.
+        """
         column = getattr(self, 'analysis_settings_column', None)
         splitter = getattr(self, 'analysis_splitter', None)
         if column is None or splitter is None:
@@ -424,19 +352,24 @@ class AnalysisTabMixin:
         splitter.setSizes([side, max(0, total - side)])
 
     def clear_analysis_results(self, message):
+        """Remove the analysis results from every view and show a message instead.
+
+        Parameters
+        ----------
+        message : str
+            Text shown in the summary, headline and views (e.g. why no result is available).
+        """
         self.analysis_clean_df = self.analysis_annotated_df = None
         self.location_results = None
         if hasattr(self,'result_headline'): self.result_headline.setText(message)
-        if hasattr(self,'location_headline'): self.location_headline.setText(message)
-        self.analysis_score_points = self.analysis_clusters = None
+        self.analysis_clusters = None
         self.analysis_summary_data = {}
         self.analysis_modes = self.analysis_mode_metrics = None
         self.analysis_selected_modes = []
-        self.analysis_export_button.setEnabled(False)
         self.analysis_summary.setPlainText(message)
         self.analysis_input_label.setText('Analysis input: pending')
         if hasattr(self, 'analysis_vmd_panel'): self.analysis_vmd_panel.clear(message)
-        for name in ('analysis_field', 'analysis_score', 'analysis_cluster', 'analysis_modes', 'analysis_geoxai'):
+        for name in ('analysis_field', 'analysis_score', 'analysis_cluster', 'analysis_geoxai'):
             figure = getattr(self, name + '_figure', None)
             canvas = getattr(self, name + '_canvas', None)
             if figure is not None:
@@ -448,8 +381,18 @@ class AnalysisTabMixin:
         self.analysis_web_map.setHtml('<html><body>' + 'Candidate results pending' + '</body></html>')
 
     def reference_coordinates(self, report=False):
-        """(lat, lon) of the reference location the user entered, or None if left blank or invalid.
-        With report=True, problems are shown in the status bar."""
+        """Reference location entered by the user.
+
+        Parameters
+        ----------
+        report : bool, optional
+            Explain problems (one coordinate missing, not a number, out of range) in the status bar.
+
+        Returns
+        -------
+        tuple of float or None
+            (latitude, longitude) in decimal degrees, or None if left blank or invalid.
+        """
         lat_text = self.analysis_reference_lat.text().strip()
         lon_text = self.analysis_reference_lon.text().strip()
         if not lat_text and not lon_text:
@@ -470,11 +413,9 @@ class AnalysisTabMixin:
             return None
         return lat, lon
 
-    def reference_known(self):
-        return self.reference_coordinates() is not None
-
     def reference_coordinates_changed(self):
         #editingFinished also fires when the field just loses focus, so only rerun on a real change
+        """Rerun the analysis when the reference location really changed (editingFinished also fires on focus loss)."""
         coordinates = self.reference_coordinates(report=True)
         if coordinates == getattr(self, 'analysis_last_reference_coordinates', None):
             return
@@ -484,6 +425,13 @@ class AnalysisTabMixin:
         self.schedule_analysis()
 
     def analysis_params(self):
+        """Analysis settings from the Data & Cleaning and Automated Anomaly Analysis controls.
+
+        Returns
+        -------
+        processing.data_analysis_pipeline.AnalysisParams
+            Cleaning, window, threshold, clustering and reference settings.
+        """
         reference = self.reference_coordinates()
         startup, multiplier, percentile = self.data_workspace.cleaning_values()
         return dap.AnalysisParams(
@@ -500,18 +448,32 @@ class AnalysisTabMixin:
         )
 
     def schedule_analysis(self):
+        """Rerun the analysis shortly after a setting changes (several quick changes trigger one run)."""
         if self.active_session() is not None:
             self.analysis_update_timer.start(350)
 
-    def schedule_analysis_reload(self):
-        if self.active_session() is not None:
-            self.analysis_reload_timer.start(650)
-
     def process_analysis_dataset(self, *_args):
-        self._analysis_mode_key = None
+        """Analysis input changed: rerun the analysis.
+
+        Parameters
+        ----------
+        *_args : object
+            Ignored signal arguments.
+        """
         self.run_anomaly_analysis()
 
     def run_anomaly_analysis(self):
+        """Run the automated anomaly analysis with a loading message over the result views and location maps."""
+        views = [self.analysis_visual_tabs, getattr(self, 'location_views', None)]
+        with loading(views, 'Running anomaly analysis and drawing results...'):
+            self._run_anomaly_analysis()
+
+    def _run_anomaly_analysis(self):
+        """Run the automated anomaly analysis on the cleaned total field and show the results.
+
+        The VMD decomposition is cached per input and settings; the input and cleaning settings are recorded with the
+        results. Errors are shown in the views instead of raised.
+        """
         session = self.active_session()
         if session is None:
             return
@@ -537,22 +499,30 @@ class AnalysisTabMixin:
             summary.update(source_survey=Path(session.path).name, analysis_input=input_name,
                            processing_history=history, dataset_revision=session.revision)
             annotated = dap.annotate_clean_points(dap.add_reference_distance(frame, params), points, clusters)
-            self.analysis_score_points, self.analysis_clusters = points, clusters
+            self.analysis_clusters = clusters
             self.analysis_summary_data, self.analysis_annotated_df = summary, annotated
             self.analysis_input_label.setText(f'Analysis input: {input_name}')
             self.plot_analysis_results(annotated, points, clusters, summary)
             self.analysis_summary.setText(self.format_analysis_summary(summary))
-            radius=summary.get('candidate_radius_m')
-            spread=f'{radius:.2f} m cluster spread' if radius is not None else 'No selected candidate'
             self.result_headline.setText(f"{summary.get('n_clusters',0)} candidate clusters\n{summary.get('n_hits',0)} hit windows")
-            self.location_headline.setText(f"{spread}. This is a magnetic anomaly candidate requiring field verification. Cluster spread is not a confidence interval.")
-            self.analysis_export_button.setEnabled(True)
             self.statusBar().showMessage(f"{Path(session.path).name}: {len(frame)} shared samples | {summary['n_clusters']} candidate clusters")
         except Exception as exc:
             self.clear_analysis_results(f'Analysis unavailable: {exc}')
             self.statusBar().showMessage(f'Candidate analysis unavailable: {exc}')
 
     def format_analysis_summary(self, summary):
+        """Text of the analysis summary panel.
+
+        Parameters
+        ----------
+        summary : dict
+            Analysis summary (see data_analysis_pipeline.summarize_analysis).
+
+        Returns
+        -------
+        str
+            Candidate estimate, processing summary, scoring parameters and cluster results.
+        """
         if not summary:
             return 'No anomaly analysis has been run.'
         lines = [f"Survey: {summary.get('source_survey', '')}", f"Analysis input: {summary.get('analysis_input', '')}", f"Dataset revision: {summary.get('dataset_revision', '')}", f"Field processing: {json.dumps(summary.get('processing_history', []), sort_keys=True)}", '']
@@ -604,6 +574,17 @@ class AnalysisTabMixin:
         return '\n'.join(lines)
 
     def plot_analysis_results(self, clean_df, score_points, clusters, summary):
+        """Draw every analysis view and keep the results for the Location Estimate tab.
+
+        Parameters
+        ----------
+        clean_df : pandas.DataFrame
+            Annotated survey.
+        score_points, clusters : pandas.DataFrame
+            Score windows and clusters.
+        summary : dict
+            Analysis summary.
+        """
         self.location_results = (clean_df, score_points, clusters, summary)
         self.plot_analysis_total_field(clean_df)
         self.plot_analysis_score_trace(score_points)
@@ -613,6 +594,13 @@ class AnalysisTabMixin:
         self.refresh_analysis_web_map(clean_df, score_points, clusters, summary)
 
     def style_analysis_axis(self, ax):
+        """Light background, soft grid and dark text for an analysis plot.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Axes to style.
+        """
         pal = plot_palette()
         ax.set_facecolor(pal['bg'])
         ax.grid(color=pal['grid'], linewidth=0.8, alpha=0.9)
@@ -624,6 +612,13 @@ class AnalysisTabMixin:
         ax.yaxis.label.set_color(pal['text'])
 
     def plot_analysis_total_field(self, clean_df):
+        """Plot the analysed magnetic field against time.
+
+        Parameters
+        ----------
+        clean_df : pandas.DataFrame
+            Analysed survey.
+        """
         self.analysis_field_figure.clear()
         ax_field = self.analysis_field_figure.add_subplot(111)
         ordered = clean_df.sort_values('Time (s)').reset_index(drop=True)
@@ -636,6 +631,13 @@ class AnalysisTabMixin:
         self.analysis_field_canvas.draw_idle()
 
     def plot_analysis_score_trace(self, score_points):
+        """Plot the anomaly score of each window with the threshold and the hit windows.
+
+        Parameters
+        ----------
+        score_points : pandas.DataFrame
+            Score windows.
+        """
         self.analysis_score_figure.clear()
         ax_score = self.analysis_score_figure.add_subplot(111)
         if score_points is not None and not score_points.empty:
@@ -675,6 +677,7 @@ class AnalysisTabMixin:
         self.analysis_score_canvas.draw_idle()
 
     def plot_analysis_mode_metrics(self):
+        """Show the analysis VMD decomposition (read-only) in the VMD Modes view."""
         if self.analysis_modes is None or self.analysis_clean_df is None:
             self.analysis_vmd_panel.clear();return
         frame=self.analysis_clean_df.sort_values('Time (s)').reset_index(drop=True)
@@ -682,6 +685,20 @@ class AnalysisTabMixin:
             self.analysis_modes,self.analysis_mode_metrics,self.analysis_selected_modes,'Time (s)')
 
     def refresh_analysis_geoxai(self, clean_df, score_points, clusters, summary):
+        """Explain the candidate (GeoXAI) and show the explanation.
+
+        Builds the GeoXAI report (narrative, cluster scores and the saved-model feature explanation), points the local
+        window selector at the score window closest to the selected candidate, and draws the chosen view.
+
+        Parameters
+        ----------
+        clean_df : pandas.DataFrame
+            Analysed survey.
+        score_points, clusters : pandas.DataFrame
+            Score windows and clusters.
+        summary : dict
+            Analysis summary.
+        """
         if not hasattr(self, 'analysis_geoxai_text'):
             return
 
@@ -732,6 +749,17 @@ class AnalysisTabMixin:
         self.render_analysis_geoxai()
 
     def render_analysis_geoxai(self, *_):
+        """Draw the Explainable AI view for the current choices.
+
+        Global view: mean absolute SHAP contribution of each feature over all windows. Local view: SHAP contributions
+        for the selected score window (with its score, threshold margin, cluster and predicted category). The evidence
+        chart view shows each cluster's support and spread instead. The narrative text follows the chosen view.
+
+        Parameters
+        ----------
+        *_ : object
+            Ignored signal arguments.
+        """
         report = getattr(self, 'analysis_geoxai_report', None)
         if report is None:
             return
@@ -985,7 +1013,7 @@ class AnalysisTabMixin:
         self.analysis_geoxai_canvas.draw_idle()    
 
     def arm_xai_score_selection(self):
-        """Enable one explicit selection on the existing score trace."""
+        """Enable one click on the anomaly score plot to choose the window explained in the local view."""
         report = getattr(self, 'analysis_geoxai_report', None)
 
         if report is None or report.metadata.get('status') != 'available':
@@ -1009,7 +1037,15 @@ class AnalysisTabMixin:
         )
 
     def select_xai_window_on_score(self, event):
-        """Explain the real window at a selected score-plot point."""
+        """Explain the score window nearest to a click on the anomaly score plot (switches to the local view).
+
+        Ignored while the plot toolbar's pan or zoom tool is active.
+
+        Parameters
+        ----------
+        event : matplotlib.backend_bases.MouseEvent
+            Click on the score plot.
+        """
         if (
             not getattr(self, '_xai_score_pick_armed', False)
             or event.button != 1
