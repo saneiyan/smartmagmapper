@@ -4,25 +4,29 @@ SmartMagMapper is a desktop application for processing and interpreting magnetic
 
 ## What Is Included
 
-This repository contains the application source code.
+This repository contains the application source code in `src/`, example surveys in `src/examples/` and the build
+scripts for the stand-alone app (`src/build-app.sh`, `src/build-windows.bat`, PyInstaller `.spec` files and
+`splashScreen.py`).
 
-The code is split into two packages:
+The code in `src/` is split into two packages:
 
 - `GUI.py` - the main window and the application launcher (run this file). It builds the window and its tabs; its behaviour comes from these modules in `ui/`: `survey_actions.py` (import and cleaning actions), `analysis_tab.py` (Anomaly Analysis tab), `location_tab.py` (Location Estimate tab) and `exports.py` (File > Export Data).
 - `ui/` - the rest of the user interface (PyQt6):
   - `data_workspace.py` - the Data & Cleaning tab (cleaning settings, cleaning maps, data tables, signal plots).
   - `filter_workspace.py`, `filter_comparison.py`, `vmd_panel.py` - the Filter Lab tab.
   - `dialogs.py` - the import and export dialogs; `project_tools.py` - project files and the File/Edit/View/Tools menus.
-  - `theme.py`, `table_model.py`, `busy.py`, `confirm.py` - styling, tables and shared pop-ups.
+  - `theme.py`, `table_model.py`, `busy.py`, `confirm.py` - styling (light/dark plot themes), tables and shared pop-ups (including the loading messages).
+  - `xai_help.py` - plain-language definitions of the Explainable AI features.
 - `processing/` - data processing with no PyQt6 dependency, usable from scripts:
   - `data_analysis_pipeline.py` - survey import, synchronization, cleaning, suggested cleaning settings and anomaly analysis.
   - `scientific_filters.py` - Filter Lab filters (time/path-series filters, VMD, continuation and reduction to pole).
-  - `geoxai_interpreter.py` - explanation layer for anomaly candidates; `survey_session.py`, `project_io.py` - survey state and project files.
+  - `geoxai_interpreter.py` - explanation layer for anomaly candidates; `xai_features.py`, `xai_model.py` and `models/` - the saved Random Forest model and its global and local SHAP explanations.
+  - `survey_session.py`, `project_io.py` - survey state and project files.
   - `map_maker.py` - maps and GeoTIFF export; `web_map.py` - web maps (folium); `comparison_spectrum.py` - filter comparison spectra.
   - `labels.py`, `coordinates.py` - magnetic units and display names; coordinate format conversion.
 - `requirements.txt` - Python packages needed to run the app.
 
-For example, a script can run the processing without the interface:
+For example, a script run from the `src` folder can run the processing without the interface:
 
 ```python
 from processing import data_analysis_pipeline as dap
@@ -32,7 +36,7 @@ cleaned, audit = dap.clean_survey(mag, gps, dap.AnalysisParams())
 
 Every function and class has a NumPy-style docstring describing its parameters and return values, e.g. `help(dap.clean_survey)`.
 
-Survey data files are not included in this repository. Each user should load survey files from their own computer using the app.
+Example surveys are in `src/examples/` (including the Saneiyan and Mansourian 2023 and Stauffer et al. 2026 data sets); load your own survey files from your computer using the app. The Explainable AI model explanations are only available for surveys inside the area its reference model was trained on (the Butkowsky 1A examples); elsewhere the app explains the candidate from the cluster evidence alone.
 
 ## Install
 
@@ -47,6 +51,7 @@ python -m pip install -r requirements.txt
 ## Run The App
 
 ```powershell
+cd src
 python GUI.py
 ```
 
@@ -115,7 +120,7 @@ For collaborators:
 
 1. Clone or download this repository.
 2. Install packages using `python -m pip install -r requirements.txt`.
-3. Run `python GUI.py`.
+3. Run `python GUI.py` from the `src` folder.
 4. Import a survey file from local storage.
 
 Do not upload private field survey files unless the project owner approves sharing those data.

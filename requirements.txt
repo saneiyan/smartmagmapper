@@ -1,5 +1,4 @@
-
-#Python <= 3.14
+# tested with Python =< 3.14
 PyQt6
 PyQt6-WebEngine
 matplotlib
@@ -11,9 +10,13 @@ scikit-learn
 pyproj
 vmdpy
 folium
+concave-hull
 branca
 ppigrf
 harmonica
 xarray
 rasterio
 xlrd
+shap
+joblib
+numba
