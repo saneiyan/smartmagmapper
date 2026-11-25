@@ -10,14 +10,13 @@ scripts for the stand-alone app (`src/build-app.sh`, `src/build-windows.bat`, Py
 
 The code in `src/` is split into two packages:
 
-- `GUI.py` - the main window and the application launcher (run this file). It builds the window and its tabs; its behaviour comes from these modules in `ui/`: `survey_actions.py` (import and cleaning actions), `analysis_tab.py` (Anomaly Analysis tab), `location_tab.py` (Location Estimate tab) and `exports.py` (File > Export Data).
-- `ui/` - the rest of the user interface (PyQt6):
+- Graphical User Interface (`GUI.py`) - the main window and the application launcher (run this file). It builds the window and its tabs; its behaviour comes from these modules in `src/ui/`: `survey_actions.py` (import and cleaning actions), `analysis_tab.py` (Anomaly Analysis tab), `location_tab.py` (Location Estimate tab), `map_field.py` (current map field and map filters) and `exports.py` (File > Export Data).
+- `src/ui/` - the rest of the user interface (PyQt6):
   - `data_workspace.py` - the Data & Cleaning tab (cleaning settings, cleaning maps, data tables, signal plots).
   - `filter_workspace.py`, `filter_comparison.py`, `vmd_panel.py` - the Filter Lab tab.
   - `dialogs.py` - the import and export dialogs; `project_tools.py` - project files and the File/Edit/View/Tools menus.
-  - `theme.py`, `table_model.py`, `busy.py`, `confirm.py` - styling (light/dark plot themes), tables and shared pop-ups (including the loading messages).
-  - `xai_help.py` - plain-language definitions of the Explainable AI features.
-- `processing/` - data processing with no PyQt6 dependency, usable from scripts:
+  - `theme.py`, `table_model.py`, `web_map_widget.py`, `busy.py`, `confirm.py` - styling, tables, the web-map view and shared pop-ups.
+- Application Programming Interface (API: `src/processing/`) - data processing with no PyQt6 dependency, usable from scripts:
   - `data_analysis_pipeline.py` - survey import, synchronization, cleaning, suggested cleaning settings and anomaly analysis.
   - `scientific_filters.py` - Filter Lab filters (time/path-series filters, VMD, continuation and reduction to pole).
   - `geoxai_interpreter.py` - explanation layer for anomaly candidates; `xai_features.py`, `xai_model.py` and `models/` - the saved Random Forest model and its global and local SHAP explanations.
@@ -40,9 +39,9 @@ Example surveys are in `src/examples/` (including the Saneiyan and Mansourian 20
 
 ## Install
 
-Use Python 3.10 or newer (tested with Python 3.11 on Windows 64-bit).
+Use Python 3.10 or newer (3.15 is not supported yet).
 
-Open a terminal in the project folder and run:
+Open a terminal in the project folder (`src`) and run:
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -73,7 +72,7 @@ Reduction to pole (Filter Lab) needs the inclination and declination of the Eart
 The Import Data dialog asks for:
 
 - **Magnetic field unit**: nT, µT (default), mT, T, G or mG. It is suggested from the column headers when they include a unit, e.g. `X (nT)`. Values are never converted. The unit is stored with the survey in the project, and every label, axis, colour bar, table header, exported CSV column (`BT (nT)`, ...) and GeoTIFF shows it. Internally the field columns are unit-free: `BT`, `X`, `Y`, `Z`. Projects saved before units were added open as µT.
-- **Coordinate format**: decimal degrees (default); degrees + decimal minutes (`45°07.407'N`, `45 07.407`, NMEA `4507.407`); degrees-minutes-seconds (`45°07'24.4"N`, `45 7 24.4`); or projected metres with an EPSG code (e.g. `32618` for UTM 18N). Coordinates are converted to decimal degrees (WGS 84) for processing. The original columns are kept in the raw GPS data, and the format is saved with the project.
+- **Coordinate format**: decimal degrees (default); degrees + decimal minutes (`45°07.407'N`, `45 07.407`, NMEA `4507.407`); degrees-minutes-seconds (`45°07'24.4"N`, `45 7 24.4`); or projected metres (UTM) with an EPSG code (e.g. `32618` for UTM 18N). Coordinates are converted to decimal degrees (WGS 84) for processing. The original columns are kept in the raw GPS data, and the format is saved with the project.
 
 ## Processing Workflow
 
